@@ -89,18 +89,19 @@ pub fn cpu_ms_per_gb(cpu_duration: Duration, total_bytes: usize) -> f64 {
     cpu_ms / gb
 }
 
-/// Exact protocol wire framing overhead for MIAB v1.
+/// Exact protocol wire framing overhead for MIAB v1 (RFC 001).
 ///
 /// Layout:
-/// - Initial Header: 4B Magic + 1B Version + 2B PathLen + Path ("bench/test.bin" = 14B) = 21B
+/// - Fixed Header: 64B
+/// - Relative Path: ~18B ("bench/test_blob.bin")
 /// - Chunks: N * 4B length prefixes
-/// - Terminal: 4B (0x00000000)
+/// - Terminal Bottle: 4B (0x00000000) + 4B CRC-32 = 8B
 /// - Response: 1B Status + 2B MsgLen + "Saved X bytes" (~22B) = 25B
 pub fn miab_wire_overhead(payload_len: usize, chunk_len: usize) -> usize {
     let num_chunks = payload_len.div_ceil(chunk_len);
-    let header_bytes = 4 + 1 + 2 + 14;
+    let header_bytes = 64 + 18;
     let chunk_prefix_bytes = num_chunks * 4;
-    let terminal_bottle_bytes = 4;
+    let terminal_bottle_bytes = 8;
     let response_bytes = 1 + 2 + 22;
     header_bytes + chunk_prefix_bytes + terminal_bottle_bytes + response_bytes
 }

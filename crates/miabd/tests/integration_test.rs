@@ -159,15 +159,18 @@ async fn test_invalid_magic_dropped_immediately() {
         .await
         .expect("failed to connect");
     // Send bad magic bytes "NOPE"
-    stream
-        .write_all(b"NOPE\x01\x01\x00\x04test")
-        .await
-        .expect("failed to write");
+    stream.write_all(b"NOPE").await.expect("failed to write");
     stream.flush().await.expect("failed to flush");
 
     // The server should drop connection immediately without writing response
     let mut resp_buf = [0u8; 10];
-    let res = stream.read(&mut resp_buf).await;
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read(&mut resp_buf),
+    )
+    .await
+    .expect("test timed out waiting for server drop");
+
     match res {
         Ok(0) => {}                                                     // EOF
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // Connection reset by peer
@@ -176,6 +179,138 @@ async fn test_invalid_magic_dropped_immediately() {
             other
         ),
     }
+
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_crc32_corruption_rejection() {
+    let storage_dir = tempdir().expect("failed to create storage tempdir");
+    let storage_path = storage_dir.path().to_path_buf();
+
+    let server = Server::bind("127.0.0.1:0", storage_path.clone())
+        .await
+        .expect("failed to bind server");
+    let bound_addr = server.local_addr().expect("failed to get local addr");
+    let server_addr = format!("127.0.0.1:{}", bound_addr.port());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
+
+    let mut socket = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+    let header = miab_core::MiabHeader::new("corrupt_test.bin");
+    header.write_to(&mut socket).await.unwrap();
+
+    // Send chunk
+    miab_core::write_chunk(&mut socket, b"some real data")
+        .await
+        .unwrap();
+
+    // Deliberately send wrong CRC32: 0xDEADBEEF
+    miab_core::write_terminal_bottle(&mut socket, Some(0xDEADBEEF))
+        .await
+        .unwrap();
+
+    let resp = miab_core::MiabResponse::read_from(&mut socket)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, miab_core::STATUS_CHECKSUM_MISMATCH);
+
+    // Verify partial staging file and destination file are cleaned up
+    assert!(!storage_path.join("corrupt_test.bin").exists());
+    assert!(!storage_path.join(".corrupt_test.bin.miab.part").exists());
+
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_no_overwrite_rejection() {
+    let storage_dir = tempdir().expect("failed to create storage tempdir");
+    let storage_path = storage_dir.path().to_path_buf();
+
+    let server = Server::bind("127.0.0.1:0", storage_path.clone())
+        .await
+        .expect("failed to bind server");
+    let bound_addr = server.local_addr().expect("failed to get local addr");
+    let server_addr = format!("127.0.0.1:{}", bound_addr.port());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
+
+    // 1. First upload succeeds
+    let resp1 = client::send_bytes_with_chunk_size(&server_addr, "important.dat", b"initial", 1024)
+        .await
+        .unwrap();
+    assert!(resp1.is_ok());
+
+    // 2. Second upload with NO_OVERWRITE flag set should fail
+    let mut socket = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+    let mut header = miab_core::MiabHeader::new("important.dat");
+    header.flags |= miab_core::HeaderFlags::NO_OVERWRITE;
+    header.write_to(&mut socket).await.unwrap();
+
+    let resp2 = miab_core::MiabResponse::read_from(&mut socket)
+        .await
+        .unwrap();
+    assert_eq!(resp2.status, miab_core::STATUS_FILE_EXISTS);
+
+    // Verify original content remains intact
+    let content = tokio::fs::read(storage_path.join("important.dat"))
+        .await
+        .unwrap();
+    assert_eq!(&content, b"initial");
+
+    let _ = shutdown_tx.send(());
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_auth_token_enforcement() {
+    let storage_dir = tempdir().expect("failed to create storage tempdir");
+    let storage_path = storage_dir.path().to_path_buf();
+    let required_token = [0x42u8; 16];
+
+    let server = Server::bind_with_options(
+        "127.0.0.1:0",
+        storage_path.clone(),
+        false,
+        Some(required_token),
+    )
+    .await
+    .expect("failed to bind server");
+    let bound_addr = server.local_addr().expect("failed to get local addr");
+    let server_addr = format!("127.0.0.1:{}", bound_addr.port());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
+
+    // 1. Client with wrong token is rejected with STATUS_AUTH_FAILED
+    let mut socket_bad = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+    let mut header_bad = miab_core::MiabHeader::new("auth_test.bin");
+    header_bad.auth_token = [0x99u8; 16];
+    header_bad.write_to(&mut socket_bad).await.unwrap();
+
+    let resp_bad = miab_core::MiabResponse::read_from(&mut socket_bad)
+        .await
+        .unwrap();
+    assert_eq!(resp_bad.status, miab_core::STATUS_AUTH_FAILED);
+
+    // 2. Client with correct token is accepted
+    let mut socket_good = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+    let mut header_good = miab_core::MiabHeader::new("auth_test.bin");
+    header_good.auth_token = required_token;
+    header_good.write_to(&mut socket_good).await.unwrap();
+    let empty_crc = crc32fast::Hasher::new().finalize();
+    miab_core::write_terminal_bottle(&mut socket_good, Some(empty_crc))
+        .await
+        .unwrap();
+
+    let resp_good = miab_core::MiabResponse::read_from(&mut socket_good)
+        .await
+        .unwrap();
+    assert_eq!(resp_good.status, miab_core::STATUS_OK);
 
     let _ = shutdown_tx.send(());
     let _ = server_handle.await;

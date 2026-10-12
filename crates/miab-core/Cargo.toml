@@ -7,3 +7,5 @@ edition = "2021"
 tokio = { workspace = true, features = ["io-util", "net"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+crc32fast = { workspace = true }
+

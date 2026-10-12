@@ -4,8 +4,10 @@
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
+
 import tempfile
 import time
 
@@ -153,7 +155,29 @@ def main() -> None:
             assert f.read() == "Streamed from stdin pipe"
         print("✓ Verified: Python CLI 'stream' succeeded!")
 
+        # 8. Test CRC-32 integrity error detection
+        print("==> Step 8: Testing CRC-32 integrity verification...")
+        # Open raw socket, send header, send chunk, but send bad CRC-32
+        s = socket.create_connection(("127.0.0.1", test_port))
+        client._send_header(s, "crc_fail.bin", expected_size=10)
+        s.sendall(struct.pack(">I", 10) + b"0123456789")
+        # Send bad CRC-32: 0xDEADBEEF
+        s.sendall(struct.pack(">II", 0, 0xDEADBEEF))
+        crc_error_caught = False
+        try:
+            client._read_response(s)
+        except miab.MiabServerError as e:
+            crc_error_caught = True
+            assert e.status == miab.STATUS_CHECKSUM_MISMATCH
+            print(f"Correctly caught expected CRC mismatch: {e}")
+        finally:
+            s.close()
+        assert crc_error_caught, "Corrupt CRC should have raised MiabServerError with STATUS_CHECKSUM_MISMATCH!"
+        assert not os.path.exists(os.path.join(storage_dir, "crc_fail.bin"))
+        print("✓ Verified: Server correctly caught corrupt CRC and deleted partial file!")
+
         print("\nAll native Python client tests PASSED successfully!")
+
 
     finally:
         print("==> Terminating miabd server process...")

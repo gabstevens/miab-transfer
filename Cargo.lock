@@ -227,6 +227,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -675,6 +684,7 @@ name = "miab"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crc32fast",
  "indicatif",
  "miab-core",
  "tokio",
@@ -704,6 +714,7 @@ dependencies = [
 name = "miab-core"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "thiserror",
  "tokio",
  "tracing",
@@ -714,6 +725,8 @@ name = "miabd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crc32fast",
+ "libc",
  "miab",
  "miab-core",
  "sha2",

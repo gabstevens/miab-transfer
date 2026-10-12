@@ -190,9 +190,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (remote.clone(), None)
     } else {
         println!("==> Starting embedded miabd server...");
-        let server =
-            miabd::Server::bind_with_options("127.0.0.1:0", storage_root.clone(), discard_mode)
-                .await?;
+        let server = miabd::Server::bind_with_options(
+            "127.0.0.1:0",
+            storage_root.clone(),
+            discard_mode,
+            None,
+        )
+        .await?;
+
         let addr = server.local_addr()?;
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {

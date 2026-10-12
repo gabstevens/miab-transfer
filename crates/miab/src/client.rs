@@ -47,8 +47,9 @@ pub async fn send_file_with_chunk_size(
     let addr = normalize_server_addr(server);
     let mut socket = TcpStream::connect(&addr).await?;
 
-    // 1. Send initial header
-    let header = MiabHeader::new(remote_path);
+    // 1. Send 64-byte initial header with known expected size
+    let mut header = MiabHeader::new(remote_path);
+    header.expected_size = file_size;
     header.write_to(&mut socket).await?;
 
     // 2. Setup progress bar if requested
@@ -66,6 +67,7 @@ pub async fn send_file_with_chunk_size(
 
     let mut buf = vec![0u8; chunk_size];
     let (mut socket_rx, mut socket_tx) = socket.into_split();
+    let mut hasher = crc32fast::Hasher::new();
 
     // 3. Concurrently stream chunks while listening for early server response
     let send_future = async {
@@ -74,12 +76,14 @@ pub async fn send_file_with_chunk_size(
             if n == 0 {
                 break;
             }
+            hasher.update(&buf[..n]);
             write_chunk(&mut socket_tx, &buf[..n]).await?;
             if let Some(ref p) = pb {
                 p.inc(n as u64);
             }
         }
-        write_terminal_bottle(&mut socket_tx).await?;
+        let checksum = hasher.finalize();
+        write_terminal_bottle(&mut socket_tx, Some(checksum)).await?;
         Ok::<(), MiabError>(())
     };
 
@@ -94,7 +98,7 @@ pub async fn send_file_with_chunk_size(
         }
         send_res = send_future => {
             if let Err(e) = send_res {
-                // If writing errored (e.g. server closed connection), attempt to read server error response
+                // If writing errored, attempt to read server error response
                 if let Ok(resp) = MiabResponse::read_from(&mut socket_rx).await {
                     if let Some(p) = pb {
                         p.finish_and_clear();
@@ -145,6 +149,7 @@ pub async fn send_stream<R: AsyncRead + Unpin>(
 
     let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
     let (mut socket_rx, mut socket_tx) = socket.into_split();
+    let mut hasher = crc32fast::Hasher::new();
 
     let send_future = async {
         loop {
@@ -152,12 +157,14 @@ pub async fn send_stream<R: AsyncRead + Unpin>(
             if n == 0 {
                 break;
             }
+            hasher.update(&buf[..n]);
             write_chunk(&mut socket_tx, &buf[..n]).await?;
             if let Some(ref p) = pb {
                 p.inc(n as u64);
             }
         }
-        write_terminal_bottle(&mut socket_tx).await?;
+        let checksum = hasher.finalize();
+        write_terminal_bottle(&mut socket_tx, Some(checksum)).await?;
         Ok::<(), MiabError>(())
     };
 
@@ -202,19 +209,24 @@ pub async fn send_bytes_with_chunk_size(
     let addr = normalize_server_addr(server);
     let mut socket = TcpStream::connect(&addr).await?;
 
-    let header = MiabHeader::new(remote_path);
+    let mut header = MiabHeader::new(remote_path);
+    header.expected_size = data.len() as u64;
     header.write_to(&mut socket).await?;
 
     let (mut socket_rx, mut socket_tx) = socket.into_split();
+    let mut hasher = crc32fast::Hasher::new();
 
     let send_future = async {
         let mut offset = 0;
         while offset < data.len() {
             let end = (offset + chunk_size).min(data.len());
-            write_chunk(&mut socket_tx, &data[offset..end]).await?;
+            let slice = &data[offset..end];
+            hasher.update(slice);
+            write_chunk(&mut socket_tx, slice).await?;
             offset = end;
         }
-        write_terminal_bottle(&mut socket_tx).await?;
+        let checksum = hasher.finalize();
+        write_terminal_bottle(&mut socket_tx, Some(checksum)).await?;
         Ok::<(), MiabError>(())
     };
 

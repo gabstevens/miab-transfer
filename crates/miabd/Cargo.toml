@@ -9,6 +9,9 @@ tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+crc32fast = { workspace = true }
+libc = { workspace = true }
+
 
 [dev-dependencies]
 miab = { path = "../miab" }

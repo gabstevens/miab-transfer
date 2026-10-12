@@ -8,7 +8,7 @@ pub enum MiabError {
     #[error("Unsupported protocol version: {0} (supported: 1)")]
     UnsupportedVersion(u8),
 
-    #[error("Unsupported command opcode: {0} (supported: 1 for PUT/STREAM)")]
+    #[error("Unsupported command opcode: {0} (supported: 1 for PUT, 2 for GET, 3 for STAT, 4 for DELETE)")]
     UnsupportedCommand(u8),
 
     #[error("Invalid UTF-8 sequence in path: {0}")]
@@ -20,6 +20,9 @@ pub enum MiabError {
     #[error("Path too long: length {0} exceeds max u16 length (65535)")]
     PathTooLong(usize),
 
+    #[error("Metadata too long: length {0} exceeds max u16 length (65535)")]
+    MetadataTooLong(usize),
+
     #[error("Message too long: length {0} exceeds max u16 length (65535)")]
     MessageTooLong(usize),
 
@@ -28,6 +31,21 @@ pub enum MiabError {
 
     #[error("Path traversal detected: {0}")]
     PathTraversalDetected(String),
+
+    #[error("Checksum mismatch: expected 0x{expected:08X}, calculated 0x{actual:08X}")]
+    ChecksumMismatch { expected: u32, actual: u32 },
+
+    #[error("Target file already exists (NO_OVERWRITE flag set): {0}")]
+    FileExists(String),
+
+    #[error("Authentication failed: invalid or unauthorized device token")]
+    AuthFailed,
+
+    #[error("Insufficient disk space: payload requires {needed} bytes, only {available} bytes available")]
+    InsufficientSpace { needed: u64, available: u64 },
+
+    #[error("Header corrupted or malformed: {0}")]
+    HeaderCorrupted(String),
 
     #[error("Protocol error: {0}")]
     Protocol(String),
