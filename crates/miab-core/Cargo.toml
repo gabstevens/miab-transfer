@@ -1,0 +1,9 @@
+[package]
+name = "miab-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true, features = ["io-util", "net"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miab"
+version = "0.1.0"
+description = "Message In A Bottle (MIAB v1) pure-Python client engine"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "MIAB Project" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking",
+]
+
+[project.scripts]
+miab-py = "miab:main"
+
+[tool.setuptools]
+py-modules = ["miab"]

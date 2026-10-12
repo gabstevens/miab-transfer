@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/miab-core",
+    "crates/miabd",
+    "crates/miab",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+tempfile = "3"
+sha2 = "0.10"

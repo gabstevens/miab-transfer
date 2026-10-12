@@ -1,0 +1,16 @@
+[package]
+name = "miabd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+miab-core = { path = "../miab-core" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+miab = { path = "../miab" }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
