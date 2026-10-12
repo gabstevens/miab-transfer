@@ -2,9 +2,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::MiabError;
-use crate::{
-    CMD_PUT, MAGIC, MAX_CHUNK_SIZE, PROTOCOL_VERSION, STATUS_ERR, STATUS_OK,
-};
+use crate::{CMD_PUT, MAGIC, MAX_CHUNK_SIZE, PROTOCOL_VERSION, STATUS_ERR, STATUS_OK};
 
 /// MIAB v1 Initial Header sent by the client upon establishing a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,9 +101,7 @@ pub async fn write_chunk<W: AsyncWrite + Unpin>(
 }
 
 /// Write the terminal bottle chunk (chunk length 0) indicating EOF.
-pub async fn write_terminal_bottle<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-) -> Result<(), MiabError> {
+pub async fn write_terminal_bottle<W: AsyncWrite + Unpin>(writer: &mut W) -> Result<(), MiabError> {
     writer.write_u32(0).await?;
     writer.flush().await?;
     Ok(())
@@ -196,7 +192,9 @@ impl MiabResponse {
 /// or invalid path components.
 pub fn sanitize_path(storage_root: &Path, rel_path: &str) -> Result<PathBuf, MiabError> {
     if rel_path.is_empty() {
-        return Err(MiabError::PathTraversalDetected("Path is empty".to_string()));
+        return Err(MiabError::PathTraversalDetected(
+            "Path is empty".to_string(),
+        ));
     }
 
     // Reject leading slashes

@@ -1,0 +1,10 @@
+# Configuration file for Message In A Bottle Daemon (miabd)
+# Location: /etc/default/miabd
+
+# Bind address and port (default: 0.0.0.0:6422)
+# To bind only to a Tailscale / WireGuard interface, set its IP:
+# BIND_ADDR="100.64.0.1:6422"
+BIND_ADDR="0.0.0.0:6422"
+
+# Storage root directory (default: /var/lib/miab)
+STORAGE_ROOT="/var/lib/miab"

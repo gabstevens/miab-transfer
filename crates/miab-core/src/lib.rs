@@ -99,7 +99,9 @@ mod tests {
         let len1 = read_chunk_length(&mut cursor).await.unwrap();
         assert_eq!(len1, 11);
         let mut data = vec![0u8; 11];
-        tokio::io::AsyncReadExt::read_exact(&mut cursor, &mut data).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(&mut cursor, &mut data)
+            .await
+            .unwrap();
         assert_eq!(&data, b"hello world");
 
         let len2 = read_chunk_length(&mut cursor).await.unwrap();

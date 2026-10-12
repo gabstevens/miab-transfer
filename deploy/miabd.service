@@ -1,0 +1,43 @@
+[Unit]
+Description=Message In A Bottle Daemon (miabd)
+Documentation=https://github.com/gabstevens/miab-transfer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="BIND_ADDR=0.0.0.0:6422"
+Environment="STORAGE_ROOT=/var/lib/miab"
+EnvironmentFile=-/etc/default/miabd
+
+ExecStart=/usr/local/bin/miabd -b ${BIND_ADDR} -s ${STORAGE_ROOT}
+Restart=always
+RestartSec=5s
+
+# Automatic state directory creation (/var/lib/miab)
+StateDirectory=miab
+StateDirectoryMode=0750
+
+# Security hardening
+DynamicUser=yes
+User=miab
+Group=miab
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Resource constraints
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

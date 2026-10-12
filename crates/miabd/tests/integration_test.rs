@@ -1,7 +1,7 @@
-use std::io::Write;
 use miab::client;
 use miabd::server::Server;
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use tempfile::tempdir;
 use tokio::fs;
 
@@ -18,9 +18,7 @@ async fn test_full_file_transfer_and_verification() {
     let server_addr = format!("127.0.0.1:{}", bound_addr.port());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server_handle = tokio::spawn(async move {
-        server.run_until_shutdown(shutdown_rx).await
-    });
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
 
     // 2. Generates a synthetic 5MB test file with known contents
     let source_dir = tempdir().expect("failed to create source tempdir");
@@ -39,7 +37,8 @@ async fn test_full_file_transfer_and_verification() {
 
     {
         let mut f = std::fs::File::create(&source_file_path).expect("failed to create source file");
-        f.write_all(&file_data).expect("failed to write source file");
+        f.write_all(&file_data)
+            .expect("failed to write source file");
         f.flush().expect("failed to flush source file");
     }
 
@@ -119,9 +118,7 @@ async fn test_streaming_transfer() {
     let server_addr = format!("127.0.0.1:{}", bound_addr.port());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server_handle = tokio::spawn(async move {
-        server.run_until_shutdown(shutdown_rx).await
-    });
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
 
     let synthetic_stream_data = b"streaming direct payload without known size beforehand";
     let cursor = std::io::Cursor::new(synthetic_stream_data.to_vec());
@@ -156,22 +153,28 @@ async fn test_invalid_magic_dropped_immediately() {
     let server_addr = format!("127.0.0.1:{}", bound_addr.port());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server_handle = tokio::spawn(async move {
-        server.run_until_shutdown(shutdown_rx).await
-    });
+    let server_handle = tokio::spawn(async move { server.run_until_shutdown(shutdown_rx).await });
 
-    let mut stream = TcpStream::connect(&server_addr).await.expect("failed to connect");
+    let mut stream = TcpStream::connect(&server_addr)
+        .await
+        .expect("failed to connect");
     // Send bad magic bytes "NOPE"
-    stream.write_all(b"NOPE\x01\x01\x00\x04test").await.expect("failed to write");
+    stream
+        .write_all(b"NOPE\x01\x01\x00\x04test")
+        .await
+        .expect("failed to write");
     stream.flush().await.expect("failed to flush");
 
     // The server should drop connection immediately without writing response
     let mut resp_buf = [0u8; 10];
     let res = stream.read(&mut resp_buf).await;
     match res {
-        Ok(0) => {} // EOF
+        Ok(0) => {}                                                     // EOF
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // Connection reset by peer
-        other => panic!("Expected connection dropped (EOF or Reset), got {:?}", other),
+        other => panic!(
+            "Expected connection dropped (EOF or Reset), got {:?}",
+            other
+        ),
     }
 
     let _ = shutdown_tx.send(());

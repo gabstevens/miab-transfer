@@ -1,5 +1,6 @@
 # miab-transfer (Message In A Bottle)
 
+[![CI](https://github.com/gabstevens/miab-transfer/actions/workflows/ci.yml/badge.svg)](https://github.com/gabstevens/miab-transfer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/python-3.8%2B-green.svg)](https://www.python.org/)
@@ -93,6 +94,47 @@ tar -czf - /var/log | miab stream 192.168.1.100:6422 backups/logs.tar.gz
 
 # Stream camera pipe
 ffmpeg -i /dev/video0 -f mpegts - | miab stream 192.168.1.100:6422 live/cam.ts
+```
+
+---
+
+## Deployment & Homelab Tooling
+
+### 1. One-Line Installer
+Install binaries directly on Linux (x86_64, aarch64, armv7) or macOS:
+```bash
+curl -sSfL https://raw.githubusercontent.com/gabstevens/miab-transfer/main/deploy/install.sh | bash
+
+# Or install and enable the systemd daemon automatically:
+curl -sSfL https://raw.githubusercontent.com/gabstevens/miab-transfer/main/deploy/install.sh | bash -s -- --service
+```
+
+### 2. Running via Systemd
+A hardened, sandboxed systemd service file is provided in `deploy/miabd.service`:
+```bash
+# Copy binary, service unit, and default config
+sudo cp target/release/miabd /usr/local/bin/
+sudo cp deploy/miabd.service /etc/systemd/system/
+sudo cp deploy/miabd.default /etc/default/miabd
+
+# Enable and start service
+sudo systemctl daemon-reload
+sudo systemctl enable --now miabd
+sudo systemctl status miabd
+```
+
+### 3. Running with Docker / Podman
+Build and run the lightweight container (<15 MB):
+```bash
+# Build container image
+docker build -t miabd .
+
+# Run daemon with persistent storage volume
+docker run -d \
+  --name miabd \
+  -p 6422:6422 \
+  -v /mnt/storage:/storage \
+  miabd
 ```
 
 ---

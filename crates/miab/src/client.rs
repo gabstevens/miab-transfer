@@ -1,9 +1,9 @@
-use std::path::Path;
 use indicatif::{ProgressBar, ProgressStyle};
 use miab_core::{
     write_chunk, write_terminal_bottle, MiabError, MiabHeader, MiabResponse, DEFAULT_CHUNK_SIZE,
     DEFAULT_PORT,
 };
+use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::TcpStream;
 
@@ -65,9 +65,7 @@ pub async fn send_file(
         Ok::<(), MiabError>(())
     };
 
-    let response_future = async {
-        MiabResponse::read_from(&mut socket_rx).await
-    };
+    let response_future = async { MiabResponse::read_from(&mut socket_rx).await };
 
     tokio::select! {
         early_resp = response_future => {
@@ -145,9 +143,7 @@ pub async fn send_stream<R: AsyncRead + Unpin>(
         Ok::<(), MiabError>(())
     };
 
-    let response_future = async {
-        MiabResponse::read_from(&mut socket_rx).await
-    };
+    let response_future = async { MiabResponse::read_from(&mut socket_rx).await };
 
     tokio::select! {
         early_resp = response_future => {

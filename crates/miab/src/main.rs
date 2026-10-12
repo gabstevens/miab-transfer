@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use miab::client::{send_file, send_stream};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "miab", about = "Message In A Bottle Client CLI")]

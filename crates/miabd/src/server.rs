@@ -1,11 +1,11 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
 use clap::Parser;
 use miab_core::{
     copy_chunk_payload, read_chunk_length, sanitize_path, MiabError, MiabHeader, MiabResponse,
     DEFAULT_CHUNK_SIZE,
 };
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -131,7 +131,7 @@ async fn handle_connection(mut socket: TcpStream, peer_addr: SocketAddr, storage
 /// 3. Create parent directories and destination file
 /// 4. Stream bottle chunks directly to disk
 /// 5. Flush file and send OK response
-async fn process_connection(socket: &mut TcpStream, storage_root: &PathBuf) -> Result<(), MiabError> {
+async fn process_connection(socket: &mut TcpStream, storage_root: &Path) -> Result<(), MiabError> {
     // 1. Read initial header
     let header = MiabHeader::read_from(socket).await?;
     tracing::info!(path = %header.path, "Processing incoming transfer request");
