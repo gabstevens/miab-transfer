@@ -23,6 +23,24 @@ pub async fn send_file(
     local_file: &Path,
     show_progress: bool,
 ) -> Result<MiabResponse, MiabError> {
+    send_file_with_chunk_size(
+        server,
+        remote_path,
+        local_file,
+        show_progress,
+        DEFAULT_CHUNK_SIZE,
+    )
+    .await
+}
+
+/// Send a local file to the remote MIAB server with a custom chunk size.
+pub async fn send_file_with_chunk_size(
+    server: &str,
+    remote_path: &str,
+    local_file: &Path,
+    show_progress: bool,
+    chunk_size: usize,
+) -> Result<MiabResponse, MiabError> {
     let mut file = tokio::fs::File::open(local_file).await?;
     let file_size = file.metadata().await?.len();
 
@@ -46,7 +64,7 @@ pub async fn send_file(
         None
     };
 
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
+    let mut buf = vec![0u8; chunk_size];
     let (mut socket_rx, mut socket_tx) = socket.into_split();
 
     // 3. Concurrently stream chunks while listening for early server response
@@ -170,6 +188,50 @@ pub async fn send_stream<R: AsyncRead + Unpin>(
                 p.finish_and_clear();
             }
             resp
+        }
+    }
+}
+
+/// Send an in-memory byte buffer to the remote MIAB server with a custom chunk size.
+pub async fn send_bytes_with_chunk_size(
+    server: &str,
+    remote_path: &str,
+    data: &[u8],
+    chunk_size: usize,
+) -> Result<MiabResponse, MiabError> {
+    let addr = normalize_server_addr(server);
+    let mut socket = TcpStream::connect(&addr).await?;
+
+    let header = MiabHeader::new(remote_path);
+    header.write_to(&mut socket).await?;
+
+    let (mut socket_rx, mut socket_tx) = socket.into_split();
+
+    let send_future = async {
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + chunk_size).min(data.len());
+            write_chunk(&mut socket_tx, &data[offset..end]).await?;
+            offset = end;
+        }
+        write_terminal_bottle(&mut socket_tx).await?;
+        Ok::<(), MiabError>(())
+    };
+
+    let response_future = async { MiabResponse::read_from(&mut socket_rx).await };
+
+    tokio::select! {
+        early_resp = response_future => {
+            early_resp
+        }
+        send_res = send_future => {
+            if let Err(e) = send_res {
+                if let Ok(resp) = MiabResponse::read_from(&mut socket_rx).await {
+                    return Ok(resp);
+                }
+                return Err(e);
+            }
+            MiabResponse::read_from(&mut socket_rx).await
         }
     }
 }

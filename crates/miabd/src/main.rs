@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = ServerArgs::parse();
-    let server = Server::bind(&args.bind, args.storage_root).await?;
+    let server = Server::bind_with_options(&args.bind, args.storage_root, args.discard).await?;
     server.run().await?;
     Ok(())
 }

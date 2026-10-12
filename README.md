@@ -187,6 +187,58 @@ python3 test_binding.py
 
 ---
 
+## Benchmarking (`miab-bench`)
+
+The workspace includes a dedicated benchmarking harness (`miab-bench`) that compares MIAB v1 against HTTP/1.1 chunked streaming uploads. It supports memory-bounded throughput sweeps, in-memory null sink mode (`--sink discard`) to eliminate disk bottlenecks, and a **userspace VPN network simulator** that accurately models Tailscale/WireGuard conditions without requiring root/sudo privileges or touching host network interfaces.
+
+### 1. Loopback Benchmark (Zero Overhead)
+Compare MIAB vs HTTP streaming over localhost:
+```bash
+cargo run --release -p miab-bench -- --sizes 1M,5M,20M --chunks 64K,256K -i 3
+```
+
+### 2. Simulated Tailscale VPN (MTU 1280 + RTT Latency)
+Test realistic VPN / WAN performance using the built-in unprivileged pipelined proxy:
+```bash
+cargo run --release -p miab-bench -- \
+  --sizes 1M,5M \
+  --chunks 64K,256K \
+  --simulate-vpn \
+  --latency-ms 10 \
+  --mtu 1280 \
+  -i 3
+```
+
+### 3. Remote Node Benchmarking (Across Real Tailscale Overlay)
+Benchmark directly against a live remote node across a VPN or LAN:
+```bash
+cargo run --release -p miab-bench -- \
+  --sizes 10M,50M \
+  --miab-server 100.64.0.5:6422 \
+  --http-server http://100.64.0.5:8080/upload
+```
+
+### Sample Benchmark Results (Localhost vs Simulated Tailscale VPN)
+
+```
+=========================================================================================================
+Payload    | Protocol           | Chunk      | Mean Time    | Min / Max         | Throughput   | Bandwidth     
+---------------------------------------------------------------------------------------------------------
+[Localhost Loopback]
+5.0 MB     | MIAB v1            | 64 KB      | 2.26ms       | 2.23ms / 2.30ms   | 2208.98 MB/s | 18530 Mbps
+5.0 MB     | MIAB v1            | 256 KB     | 1.99ms       | 1.79ms / 2.18ms   | 2516.89 MB/s | 21113 Mbps
+5.0 MB     | HTTP/1.1 (Chunked) | 64 KB      | 2.06ms       | 1.84ms / 2.29ms   | 2422.13 MB/s | 20318 Mbps
+---------------------------------------------------------------------------------------------------------
+[Simulated Tailscale VPN: 20ms RTT, MTU 1280]
+5.0 MB     | MIAB v1            | 64 KB      | 88.91ms      | 69.72ms / 108.1ms |   56.24 MB/s |   471 Mbps
+5.0 MB     | MIAB v1            | 256 KB     | 68.77ms      | 67.85ms / 69.70ms |   72.70 MB/s |   609 Mbps
+5.0 MB     | HTTP/1.1 (Chunked) | 64 KB      | 71.69ms      | 68.94ms / 74.44ms |   69.75 MB/s |   585 Mbps
+=========================================================================================================
+```
+
+---
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
