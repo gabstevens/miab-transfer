@@ -1,9 +1,27 @@
 use crate::metrics::{
-    cpu_ms_per_gb, current_rss_bytes, http_wire_overhead, miab_wire_overhead, ProcessMetrics,
+    cpu_ms_per_gb, current_rss_bytes, http2_wire_overhead, http_wire_overhead, miab_wire_overhead,
+    ProcessMetrics,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchProtocol {
+    Miab,
+    Http1,
+    Http2,
+}
+
+impl BenchProtocol {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Miab => "MIAB v1",
+            Self::Http1 => "HTTP/1.1 (Chunked)",
+            Self::Http2 => "HTTP/2 (h2c Multiplexed)",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BenchRecord {
@@ -143,7 +161,7 @@ pub async fn run_miab_iteration(
 }
 
 /// Execute a single HTTP/1.1 chunked benchmark iteration.
-pub async fn run_http_iteration(
+pub async fn run_http1_iteration(
     http_url: &str,
     payload: &[u8],
     chunk_size: usize,
@@ -153,13 +171,36 @@ pub async fn run_http_iteration(
 
     let stream = futures_util::stream::iter(chunks);
     let body = reqwest::Body::wrap_stream(stream);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().http1_only().build()?;
 
     let start = Instant::now();
     let resp = client.put(http_url).body(body).send().await?;
 
     if !resp.status().is_success() {
-        return Err(format!("HTTP server returned status: {}", resp.status()).into());
+        return Err(format!("HTTP/1.1 server returned status: {}", resp.status()).into());
+    }
+
+    Ok(start.elapsed())
+}
+
+/// Execute a single HTTP/2 cleartext (h2c) benchmark iteration.
+pub async fn run_http2_iteration(
+    http_url: &str,
+    payload: &[u8],
+    chunk_size: usize,
+) -> Result<Duration, Box<dyn std::error::Error + Send + Sync>> {
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+        payload.chunks(chunk_size).map(|c| Ok(c.to_vec())).collect();
+
+    let stream = futures_util::stream::iter(chunks);
+    let body = reqwest::Body::wrap_stream(stream);
+    let client = reqwest::Client::builder().http2_prior_knowledge().build()?;
+
+    let start = Instant::now();
+    let resp = client.put(http_url).body(body).send().await?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP/2 server returned status: {}", resp.status()).into());
     }
 
     Ok(start.elapsed())
@@ -194,8 +235,8 @@ pub async fn run_miab_suite(
     })
 }
 
-/// Measure a batch of HTTP iterations while profiling CPU and memory usage.
-pub async fn run_http_suite(
+/// Measure a batch of HTTP/1.1 iterations while profiling CPU and memory usage.
+pub async fn run_http1_suite(
     http_url: &str,
     payload: &[u8],
     chunk_size: usize,
@@ -205,7 +246,7 @@ pub async fn run_http_suite(
     let mut durations = Vec::with_capacity(iterations);
 
     for _ in 0..iterations {
-        let d = run_http_iteration(http_url, payload, chunk_size).await?;
+        let d = run_http1_iteration(http_url, payload, chunk_size).await?;
         durations.push(d);
     }
 
@@ -223,9 +264,38 @@ pub async fn run_http_suite(
     })
 }
 
+/// Measure a batch of HTTP/2 iterations while profiling CPU and memory usage.
+pub async fn run_http2_suite(
+    http_url: &str,
+    payload: &[u8],
+    chunk_size: usize,
+    iterations: usize,
+) -> Result<BenchRecord, Box<dyn std::error::Error + Send + Sync>> {
+    let m_start = ProcessMetrics::snapshot();
+    let mut durations = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let d = run_http2_iteration(http_url, payload, chunk_size).await?;
+        durations.push(d);
+    }
+
+    let m_end = ProcessMetrics::snapshot();
+    let cpu_duration = m_end.cpu_delta(&m_start);
+    let wire_overhead_bytes = http2_wire_overhead(payload.len(), chunk_size);
+
+    Ok(BenchRecord {
+        protocol: "HTTP/2 (h2c)".to_string(),
+        payload_bytes: payload.len(),
+        chunk_bytes: chunk_size,
+        durations,
+        cpu_duration,
+        wire_overhead_bytes,
+    })
+}
+
 /// Run concurrent parallel streams stress test measuring aggregate throughput and peak RSS.
 pub async fn run_concurrency_test(
-    is_miab: bool,
+    protocol: BenchProtocol,
     target: &str,
     payload: Arc<Vec<u8>>,
     chunk_size: usize,
@@ -253,26 +323,77 @@ pub async fn run_concurrency_test(
     let errors = Arc::new(AtomicUsize::new(0));
     let start_wall = Instant::now();
 
+    let http1_client = if protocol == BenchProtocol::Http1 {
+        Some(Arc::new(
+            reqwest::Client::builder()
+                .http1_only()
+                .build()
+                .expect("failed to build http1 client"),
+        ))
+    } else {
+        None
+    };
+
+    let http2_client = if protocol == BenchProtocol::Http2 {
+        Some(Arc::new(
+            reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .build()
+                .expect("failed to build http2 client"),
+        ))
+    } else {
+        None
+    };
+
     let mut handles = Vec::with_capacity(concurrency);
     for i in 0..concurrency {
         let target = target.to_string();
         let payload = payload.clone();
         let errors = errors.clone();
+        let h1 = http1_client.clone();
+        let h2 = http2_client.clone();
 
         handles.push(tokio::spawn(async move {
-            if is_miab {
-                let path = format!("bench/concurrent_{}.bin", i);
-                if miab::client::send_bytes_with_chunk_size(&target, &path, &payload, chunk_size)
+            match protocol {
+                BenchProtocol::Miab => {
+                    let path = format!("bench/concurrent_{}.bin", i);
+                    if miab::client::send_bytes_with_chunk_size(
+                        &target, &path, &payload, chunk_size,
+                    )
                     .await
                     .is_err()
-                {
-                    errors.fetch_add(1, Ordering::Relaxed);
+                    {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-            } else if run_http_iteration(&target, &payload, chunk_size)
-                .await
-                .is_err()
-            {
-                errors.fetch_add(1, Ordering::Relaxed);
+                BenchProtocol::Http1 => {
+                    let client = h1.unwrap();
+                    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                        payload.chunks(chunk_size).map(|c| Ok(c.to_vec())).collect();
+                    let stream = futures_util::stream::iter(chunks);
+                    let body = reqwest::Body::wrap_stream(stream);
+                    if let Ok(resp) = client.put(&target).body(body).send().await {
+                        if !resp.status().is_success() {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                BenchProtocol::Http2 => {
+                    let client = h2.unwrap();
+                    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                        payload.chunks(chunk_size).map(|c| Ok(c.to_vec())).collect();
+                    let stream = futures_util::stream::iter(chunks);
+                    let body = reqwest::Body::wrap_stream(stream);
+                    if let Ok(resp) = client.put(&target).body(body).send().await {
+                        if !resp.status().is_success() {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }));
     }
@@ -295,12 +416,7 @@ pub async fn run_concurrency_test(
     };
 
     ConcurrencyRecord {
-        protocol: if is_miab {
-            "MIAB v1"
-        } else {
-            "HTTP/1.1 (Chunked)"
-        }
-        .to_string(),
+        protocol: protocol.name().to_string(),
         concurrency,
         payload_bytes: payload.len(),
         wall_duration,
@@ -356,9 +472,9 @@ pub fn print_comprehensive_table(records: &[BenchRecord], is_markdown: bool) {
             );
         }
     } else {
-        println!("{:=<115}", "");
+        println!("{:=<122}", "");
         println!(
-            "{:<9} | {:<18} | {:<8} | {:<12} | {:<12} | {:>14} | {:>15} | {:>9}",
+            "{:<9} | {:<24} | {:<8} | {:<12} | {:<12} | {:>14} | {:>15} | {:>9}",
             "Payload",
             "Protocol",
             "Chunk",
@@ -368,10 +484,10 @@ pub fn print_comprehensive_table(records: &[BenchRecord], is_markdown: bool) {
             "CPU Time / GB",
             "Wire Tax"
         );
-        println!("{:-<115}", "");
+        println!("{:-<122}", "");
         for r in records {
             println!(
-                "{:<9} | {:<18} | {:<8} | {:<12} | {:<12} | {:>11.2} MB/s | {:>10.2} ms/GB | {:>8.3}%",
+                "{:<9} | {:<24} | {:<8} | {:<12} | {:<12} | {:>11.2} MB/s | {:>10.2} ms/GB | {:>8.3}%",
                 format_bytes(r.payload_bytes),
                 r.protocol,
                 format_bytes(r.chunk_bytes),
@@ -382,7 +498,7 @@ pub fn print_comprehensive_table(records: &[BenchRecord], is_markdown: bool) {
                 r.wire_tax_pct(),
             );
         }
-        println!("{:=<115}", "");
+        println!("{:=<122}", "");
     }
 }
 
@@ -412,11 +528,11 @@ pub fn print_concurrency_table(records: &[ConcurrencyRecord], is_markdown: bool)
             );
         }
     } else {
-        println!("\n{:=<115}", "");
+        println!("\n{:=<122}", "");
         println!(" CONCURRENCY & MEMORY STRESS RESULTS");
-        println!("{:=<115}", "");
+        println!("{:=<122}", "");
         println!(
-            "{:<18} | {:<11} | {:<14} | {:<10} | {:>15} | {:>10} | {:>12} | {:>6}",
+            "{:<24} | {:<11} | {:<14} | {:<10} | {:>15} | {:>10} | {:>12} | {:>6}",
             "Protocol",
             "Concurrency",
             "Total Data",
@@ -426,7 +542,7 @@ pub fn print_concurrency_table(records: &[ConcurrencyRecord], is_markdown: bool)
             "Mem Delta",
             "Errors"
         );
-        println!("{:-<115}", "");
+        println!("{:-<122}", "");
         for r in records {
             let total_bytes = r.payload_bytes * r.concurrency;
             let delta_str = if r.rss_delta_bytes >= 0 {
@@ -435,7 +551,7 @@ pub fn print_concurrency_table(records: &[ConcurrencyRecord], is_markdown: bool)
                 format!("-{}", format_bytes((-r.rss_delta_bytes) as usize))
             };
             println!(
-                "{:<18} | {:>2} streams  | {:<14} | {:<10} | {:>12.2} MB/s | {:>10} | {:>12} | {:>6}",
+                "{:<24} | {:>2} streams  | {:<14} | {:<10} | {:>12.2} MB/s | {:>10} | {:>12} | {:>6}",
                 r.protocol,
                 r.concurrency,
                 format_bytes(total_bytes),
@@ -446,6 +562,6 @@ pub fn print_concurrency_table(records: &[ConcurrencyRecord], is_markdown: bool)
                 r.errors
             );
         }
-        println!("{:=<115}", "");
+        println!("{:=<122}", "");
     }
 }

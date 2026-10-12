@@ -8,7 +8,8 @@ use http_server::HttpServer;
 use proxy::UserspaceVpnProxy;
 use scenarios::{
     format_bytes, print_comprehensive_table, print_concurrency_table, run_concurrency_test,
-    run_http_suite, run_miab_suite, BenchRecord, ConcurrencyRecord,
+    run_http1_suite, run_http2_suite, run_miab_suite, BenchProtocol, BenchRecord,
+    ConcurrencyRecord,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(
     name = "miab-bench",
-    about = "Benchmark harness for MIAB v1 vs HTTP: Throughput, Latency Percentiles, CPU Efficiency, Wire Tax, and Concurrency"
+    about = "Benchmark harness for MIAB v1 vs HTTP/1.1 vs HTTP/2: Throughput, Latency Percentiles, CPU Efficiency, Wire Tax, and Concurrency"
 )]
 struct Args {
     /// Payload sizes to benchmark, comma-separated (e.g. 10K,100K,1M,10M)
@@ -40,7 +41,7 @@ struct Args {
     #[arg(long = "concurrency-payload", default_value = "1M")]
     concurrency_payload: String,
 
-    /// Protocols to benchmark: 'all', 'miab', or 'http'
+    /// Protocols to benchmark, comma-separated: 'all', 'miab', 'http1', 'http2' (or 'http')
     #[arg(short = 'p', long = "protocols", default_value = "all")]
     protocols: String,
 
@@ -120,14 +121,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conc_payload_size = parse_size(&args.concurrency_payload).unwrap_or(1024 * 1024);
 
     let discard_mode = args.sink.to_lowercase() == "discard";
-    let test_miab = args.protocols == "all" || args.protocols == "miab";
-    let test_http = args.protocols == "all" || args.protocols == "http";
+    let protocols_lower = args.protocols.to_lowercase();
+    let proto_list: Vec<&str> = protocols_lower.split(',').map(|s| s.trim()).collect();
+    let test_all = proto_list.contains(&"all");
+    let test_miab = test_all || proto_list.contains(&"miab");
+    let test_http1 = test_all || proto_list.contains(&"http1") || proto_list.contains(&"http");
+    let test_http2 = test_all || proto_list.contains(&"http2") || proto_list.contains(&"http");
+    let need_http_server = test_http1 || test_http2;
 
     println!(
         "\n=================================================================================="
     );
     println!(" MIAB-TRANSFER MULTI-DIMENSIONAL BENCHMARK SUITE");
     println!("==================================================================================");
+    let mut selected_protos = Vec::new();
+    if test_miab {
+        selected_protos.push("MIAB v1");
+    }
+    if test_http1 {
+        selected_protos.push("HTTP/1.1 (Chunked)");
+    }
+    if test_http2 {
+        selected_protos.push("HTTP/2 (h2c)");
+    }
+    println!(" Protocols       : {}", selected_protos.join(", "));
     println!(
         " Storage Sink    : {}",
         if discard_mode {
@@ -225,13 +242,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (miab_target_addr, None)
     };
 
-    // 2. Setup HTTP Server endpoint if HTTP testing is enabled
-    let (_http_server, active_http_url, _http_proxy_shutdown) = if test_http {
+    // 2. Setup HTTP Server endpoint if HTTP/1.1 or HTTP/2 testing is enabled
+    let (_http_server, active_http_url, _http_proxy_shutdown) = if need_http_server {
         if let Some(ref remote_url) = args.http_server {
             println!("==> Using remote HTTP server: {}", remote_url);
             (None, remote_url.clone(), None)
         } else {
-            println!("==> Starting embedded Axum HTTP streaming server...");
+            println!("==> Starting embedded Axum HTTP/1.1 & HTTP/2 streaming server...");
             let server = HttpServer::start(storage_root.clone(), discard_mode).await?;
             let http_addr = server.addr;
 
@@ -273,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if test_miab {
             for &chunk_size in &chunk_sizes {
                 print!(
-                    "    [MIAB] chunk: {:<8} ({} iterations)... ",
+                    "    [MIAB]   chunk: {:<8} ({} iterations)... ",
                     format_bytes(chunk_size),
                     args.iterations
                 );
@@ -290,15 +307,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
 
-        // 2. HTTP run
-        if test_http {
+        // 2. HTTP/1.1 run
+        if test_http1 {
             let default_http_chunk = 64 * 1024;
             print!(
-                "    [HTTP] chunk: {:<8} ({} iterations)... ",
+                "    [HTTP/1] chunk: {:<8} ({} iterations)... ",
                 format_bytes(default_http_chunk),
                 args.iterations
             );
-            let record = run_http_suite(
+            let record = run_http1_suite(
+                &active_http_url,
+                &payload,
+                default_http_chunk,
+                args.iterations,
+            )
+            .await?;
+            println!(
+                "done ({:.2} MB/s, p50: {:?}, CPU: {:.1} ms/GB)",
+                record.throughput_mb_s(),
+                record.p50_duration(),
+                record.cpu_ms_per_gb()
+            );
+            records.push(record);
+        }
+
+        // 3. HTTP/2 run
+        if test_http2 {
+            let default_http_chunk = 64 * 1024;
+            print!(
+                "    [HTTP/2] chunk: {:<8} ({} iterations)... ",
+                format_bytes(default_http_chunk),
+                args.iterations
+            );
+            let record = run_http2_suite(
                 &active_http_url,
                 &payload,
                 default_http_chunk,
@@ -329,9 +370,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         for &c in &concurrency_levels {
             if test_miab {
-                print!("    [MIAB] {} parallel connections... ", c);
+                print!("    [MIAB]   {} parallel connections... ", c);
                 let rec = run_concurrency_test(
-                    true,
+                    BenchProtocol::Miab,
                     &active_miab_addr,
                     conc_payload.clone(),
                     64 * 1024,
@@ -347,10 +388,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 conc_records.push(rec);
             }
 
-            if test_http {
-                print!("    [HTTP] {} parallel connections... ", c);
+            if test_http1 {
+                print!("    [HTTP/1] {} parallel connections... ", c);
                 let rec = run_concurrency_test(
-                    false,
+                    BenchProtocol::Http1,
+                    &active_http_url,
+                    conc_payload.clone(),
+                    64 * 1024,
+                    c,
+                )
+                .await;
+                println!(
+                    "done ({:.2} MB/s aggregate, peak RSS: {}, errors: {})",
+                    rec.aggregate_mb_s,
+                    format_bytes(rec.peak_rss_bytes as usize),
+                    rec.errors
+                );
+                conc_records.push(rec);
+            }
+
+            if test_http2 {
+                print!("    [HTTP/2] {} parallel multiplexed streams... ", c);
+                let rec = run_concurrency_test(
+                    BenchProtocol::Http2,
                     &active_http_url,
                     conc_payload.clone(),
                     64 * 1024,

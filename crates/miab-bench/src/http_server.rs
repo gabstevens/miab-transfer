@@ -94,3 +94,49 @@ async fn handle_upload(
 
     Ok((StatusCode::OK, format!("Saved {} bytes", total_bytes)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_http2_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = HttpServer::start(temp.path().to_path_buf(), true)
+            .await
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+
+        let payload = vec![0x42u8; 64 * 1024];
+        let url = format!("http://127.0.0.1:{}/upload", server.addr.port());
+        let res = client.put(&url).body(payload).send().await.unwrap();
+        assert!(res.status().is_success());
+        assert_eq!(res.version(), reqwest::Version::HTTP_2);
+    }
+
+    #[tokio::test]
+    async fn test_http2_streaming_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = HttpServer::start(temp.path().to_path_buf(), true)
+            .await
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+
+        let payload = vec![0x42u8; 64 * 1024];
+        let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+            payload.chunks(16 * 1024).map(|c| Ok(c.to_vec())).collect();
+        let stream = futures_util::stream::iter(chunks);
+        let body = reqwest::Body::wrap_stream(stream);
+
+        let url = format!("http://127.0.0.1:{}/upload", server.addr.port());
+        let res = client.put(&url).body(body).send().await.unwrap();
+        assert!(res.status().is_success());
+        assert_eq!(res.version(), reqwest::Version::HTTP_2);
+    }
+}

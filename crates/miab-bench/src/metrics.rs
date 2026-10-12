@@ -122,3 +122,30 @@ pub fn http_wire_overhead(payload_len: usize, chunk_len: usize) -> usize {
     let resp_headers = 130;
     req_headers + chunk_delimiters + terminal_chunk + resp_headers
 }
+
+/// Approximate protocol wire framing overhead for HTTP/2 cleartext (h2c).
+///
+/// Layout:
+/// - Connection preface: 24B client preface + SETTINGS frames (~45B)
+/// - HEADERS frame: 9B frame header + HPACK compressed headers (~40B)
+/// - DATA frames: 9B frame header per 16 KB maximum frame payload
+/// - WINDOW_UPDATE flow control: 13B per 64 KB window update
+/// - Response HEADERS frame: 9B frame header + HPACK compressed response (~35B)
+/// - Response DATA frame: 9B frame header + body (~25B)
+pub fn http2_wire_overhead(payload_len: usize, chunk_len: usize) -> usize {
+    let frame_size = chunk_len.min(16 * 1024);
+    let num_data_frames = payload_len.div_ceil(frame_size.max(1));
+    let data_frame_headers = num_data_frames * 9;
+    let window_updates = (payload_len / (64 * 1024)) * 13;
+    let conn_preface_and_settings = 45;
+    let req_headers_frame = 9 + 40;
+    let resp_headers_frame = 9 + 35;
+    let resp_data_frame = 9 + 25;
+
+    conn_preface_and_settings
+        + req_headers_frame
+        + data_frame_headers
+        + window_updates
+        + resp_headers_frame
+        + resp_data_frame
+}
