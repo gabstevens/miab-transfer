@@ -231,24 +231,34 @@ class Client:
         remote_path: str,
         data: Union[bytes, bytearray, memoryview],
         content_tag: int = TAG_GENERIC_BINARY,
+        no_overwrite: bool = False,
+        executable: bool = False,
     ) -> str:
         """Transfer an in-memory byte buffer to the remote server.
 
         :param remote_path: Destination relative path on the server.
         :param data: Byte buffer to transfer.
         :param content_tag: Optional content type tag enum.
+        :param no_overwrite: Do not overwrite target file if it already exists.
+        :param executable: Mark target file as executable (chmod +x) on completion.
         :return: Server acknowledgment message string on success.
         :raises MiabServerError: If server rejects transfer (e.g., path traversal).
         """
         view = memoryview(data)
         total_len = len(view)
 
+        flags = FLAG_ATOMIC_TMP | FLAG_CHECKSUM_PRESENT
+        if no_overwrite:
+            flags |= FLAG_NO_OVERWRITE
+        if executable:
+            flags |= FLAG_SET_EXECUTABLE
+
         with self._connect() as sock:
             self._send_header(
                 sock,
                 remote_path,
                 expected_size=total_len,
-                flags=FLAG_ATOMIC_TMP | FLAG_CHECKSUM_PRESENT,
+                flags=flags,
                 content_tag=content_tag,
             )
 
@@ -273,6 +283,8 @@ class Client:
         progress: bool = False,
         total_bytes: Optional[int] = None,
         content_tag: int = TAG_GENERIC_BINARY,
+        no_overwrite: bool = False,
+        executable: bool = False,
     ) -> str:
         """Transfer an arbitrary binary stream (e.g. sys.stdin.buffer) to the remote server.
 
@@ -281,16 +293,24 @@ class Client:
         :param progress: Whether to display a terminal progress indicator.
         :param total_bytes: Optional known size for calculating percentage and pre-allocation.
         :param content_tag: Optional content type tag enum.
+        :param no_overwrite: Do not overwrite target file if it already exists.
+        :param executable: Mark target file as executable (chmod +x) on completion.
         :return: Server acknowledgment message string on success.
         """
         expected_size = total_bytes if (total_bytes is not None and total_bytes >= 0) else UNKNOWN_SIZE
+
+        flags = FLAG_ATOMIC_TMP | FLAG_CHECKSUM_PRESENT
+        if no_overwrite:
+            flags |= FLAG_NO_OVERWRITE
+        if executable:
+            flags |= FLAG_SET_EXECUTABLE
 
         with self._connect() as sock:
             self._send_header(
                 sock,
                 remote_path,
                 expected_size=expected_size,
-                flags=FLAG_ATOMIC_TMP | FLAG_CHECKSUM_PRESENT,
+                flags=flags,
                 content_tag=content_tag,
             )
 
@@ -339,12 +359,18 @@ class Client:
         remote_path: str,
         local_path: Union[str, Path],
         progress: bool = False,
+        content_tag: int = TAG_GENERIC_BINARY,
+        no_overwrite: bool = False,
+        executable: bool = False,
     ) -> str:
         """Transfer a local file from disk to the remote server.
 
         :param remote_path: Destination relative path on the server.
         :param local_path: Local file path on disk.
         :param progress: Whether to display a terminal progress bar.
+        :param content_tag: Optional content format tag.
+        :param no_overwrite: Do not overwrite target file if it already exists.
+        :param executable: Mark target file as executable (chmod +x) on completion.
         :return: Server acknowledgment message string on success.
         """
         path = Path(local_path)
@@ -358,23 +384,55 @@ class Client:
                 stream=f,
                 progress=progress,
                 total_bytes=file_size,
+                content_tag=content_tag,
+                no_overwrite=no_overwrite,
+                executable=executable,
             )
 
 
 # Functional convenience wrappers
-def put_bytes(server: str, remote_path: str, data: Union[bytes, bytearray, memoryview], auth_token: Optional[Union[bytes, str]] = None) -> str:
+def put_bytes(
+    server: str,
+    remote_path: str,
+    data: Union[bytes, bytearray, memoryview],
+    auth_token: Optional[Union[bytes, str]] = None,
+    no_overwrite: bool = False,
+    executable: bool = False,
+) -> str:
     """Send bytes to a MIAB server using a one-off connection."""
-    return Client(server, auth_token=auth_token).put_bytes(remote_path, data)
+    return Client(server, auth_token=auth_token).put_bytes(
+        remote_path, data, no_overwrite=no_overwrite, executable=executable
+    )
 
 
-def put_file(server: str, remote_path: str, local_path: Union[str, Path], progress: bool = False, auth_token: Optional[Union[bytes, str]] = None) -> str:
+def put_file(
+    server: str,
+    remote_path: str,
+    local_path: Union[str, Path],
+    progress: bool = False,
+    auth_token: Optional[Union[bytes, str]] = None,
+    no_overwrite: bool = False,
+    executable: bool = False,
+) -> str:
     """Send a local file to a MIAB server using a one-off connection."""
-    return Client(server, auth_token=auth_token).put_file(remote_path, local_path, progress=progress)
+    return Client(server, auth_token=auth_token).put_file(
+        remote_path, local_path, progress=progress, no_overwrite=no_overwrite, executable=executable
+    )
 
 
-def put_stream(server: str, remote_path: str, stream: BinaryIO, progress: bool = False, auth_token: Optional[Union[bytes, str]] = None) -> str:
+def put_stream(
+    server: str,
+    remote_path: str,
+    stream: BinaryIO,
+    progress: bool = False,
+    auth_token: Optional[Union[bytes, str]] = None,
+    no_overwrite: bool = False,
+    executable: bool = False,
+) -> str:
     """Stream binary data to a MIAB server using a one-off connection."""
-    return Client(server, auth_token=auth_token).put_stream(remote_path, stream, progress=progress)
+    return Client(server, auth_token=auth_token).put_stream(
+        remote_path, stream, progress=progress, no_overwrite=no_overwrite, executable=executable
+    )
 
 
 def main() -> None:
@@ -383,7 +441,9 @@ def main() -> None:
         prog="miab",
         description="Message In A Bottle Client CLI (Pure Python, RFC-001)",
     )
-    parser.add_argument("--token", help="Optional 16-byte hex device token for authentication")
+    parser.add_argument("-t", "--token", help="Optional 16-byte hex device token for authentication")
+    parser.add_argument("--no-overwrite", action="store_true", help="Do not overwrite remote file if it already exists")
+    parser.add_argument("-x", "--executable", action="store_true", help="Mark remote file as executable (chmod +x)")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     # put subcommand
@@ -402,10 +462,22 @@ def main() -> None:
 
     try:
         if args.subcommand == "put":
-            resp = client.put_file(args.remote_path, args.local_file, progress=True)
+            resp = client.put_file(
+                args.remote_path,
+                args.local_file,
+                progress=True,
+                no_overwrite=args.no_overwrite,
+                executable=args.executable,
+            )
             print(f"✓ Transfer successful: {resp}")
         elif args.subcommand == "stream":
-            resp = client.put_stream(args.remote_path, sys.stdin.buffer, progress=True)
+            resp = client.put_stream(
+                args.remote_path,
+                sys.stdin.buffer,
+                progress=True,
+                no_overwrite=args.no_overwrite,
+                executable=args.executable,
+            )
             print(f"✓ Transfer successful: {resp}")
     except MiabServerError as e:
         sys.stderr.write(f"✗ Server error (status {e.status}): {e.message}\n")
@@ -417,3 +489,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

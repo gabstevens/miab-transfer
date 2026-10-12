@@ -176,6 +176,31 @@ def main() -> None:
         assert not os.path.exists(os.path.join(storage_dir, "crc_fail.bin"))
         print("✓ Verified: Server correctly caught corrupt CRC and deleted partial file!")
 
+        # 9. Test no_overwrite enforcement
+        print("==> Step 9: Testing no_overwrite flag...")
+        no_ow_target = "flags/existing.txt"
+        client.put_bytes(no_ow_target, b"original content")
+        no_ow_caught = False
+        try:
+            client.put_bytes(no_ow_target, b"new content", no_overwrite=True)
+        except miab.MiabServerError as e:
+            no_ow_caught = True
+            assert e.status == miab.STATUS_FILE_EXISTS
+            print(f"Correctly caught expected file exists error: {e}")
+        assert no_ow_caught, "no_overwrite should have raised MiabServerError with STATUS_FILE_EXISTS!"
+        with open(os.path.join(storage_dir, no_ow_target), "rb") as f:
+            assert f.read() == b"original content"
+        print("✓ Verified: no_overwrite prevented file replacement!")
+
+        # 10. Test executable flag (chmod +x)
+        print("==> Step 10: Testing executable flag...")
+        exec_target = "flags/script.sh"
+        client.put_bytes(exec_target, b"#!/bin/sh\necho hello\n", executable=True)
+        exec_file_path = os.path.join(storage_dir, exec_target)
+        mode = os.stat(exec_file_path).st_mode
+        assert mode & 0o111 != 0, f"File {exec_file_path} is not executable! Mode: {oct(mode)}"
+        print("✓ Verified: executable flag correctly set chmod +x on remote file!")
+
         print("\nAll native Python client tests PASSED successfully!")
 
 

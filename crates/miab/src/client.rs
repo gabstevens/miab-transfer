@@ -1,11 +1,55 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use miab_core::{
-    write_chunk, write_terminal_bottle, MiabError, MiabHeader, MiabResponse, DEFAULT_CHUNK_SIZE,
-    DEFAULT_PORT,
+    write_chunk, write_terminal_bottle, HeaderFlags, MiabError, MiabHeader, MiabResponse,
+    DEFAULT_CHUNK_SIZE, DEFAULT_PORT,
 };
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::TcpStream;
+
+/// Options for configuring a MIAB transfer session per RFC 001.
+#[derive(Debug, Clone)]
+pub struct SendOptions {
+    pub chunk_size: usize,
+    pub show_progress: bool,
+    pub auth_token: Option<[u8; 16]>,
+    pub no_overwrite: bool,
+    pub set_executable: bool,
+}
+
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self {
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            show_progress: false,
+            auth_token: None,
+            no_overwrite: false,
+            set_executable: false,
+        }
+    }
+}
+
+/// Parse a 16-byte hex or ASCII auth token string into a 16-byte array.
+pub fn parse_token_str(s: &str) -> Option<[u8; 16]> {
+    let clean = s.trim().replace('-', "");
+    if clean.len() == 32 {
+        let mut arr = [0u8; 16];
+        for i in 0..16 {
+            if let Ok(b) = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16) {
+                arr[i] = b;
+            } else {
+                return None;
+            }
+        }
+        Some(arr)
+    } else if clean.len() == 16 {
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(clean.as_bytes());
+        Some(arr)
+    } else {
+        None
+    }
+}
 
 /// Normalize a server address string. If no port is specified, default to 6422.
 pub fn normalize_server_addr(server: &str) -> String {
@@ -16,19 +60,21 @@ pub fn normalize_server_addr(server: &str) -> String {
     }
 }
 
-/// Send a local file to the remote MIAB server.
+/// Send a local file to the remote MIAB server with default options.
 pub async fn send_file(
     server: &str,
     remote_path: &str,
     local_file: &Path,
     show_progress: bool,
 ) -> Result<MiabResponse, MiabError> {
-    send_file_with_chunk_size(
+    send_file_with_options(
         server,
         remote_path,
         local_file,
-        show_progress,
-        DEFAULT_CHUNK_SIZE,
+        SendOptions {
+            show_progress,
+            ..Default::default()
+        },
     )
     .await
 }
@@ -41,19 +87,48 @@ pub async fn send_file_with_chunk_size(
     show_progress: bool,
     chunk_size: usize,
 ) -> Result<MiabResponse, MiabError> {
+    send_file_with_options(
+        server,
+        remote_path,
+        local_file,
+        SendOptions {
+            chunk_size,
+            show_progress,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Send a local file to the remote MIAB server with complete SendOptions.
+pub async fn send_file_with_options(
+    server: &str,
+    remote_path: &str,
+    local_file: &Path,
+    options: SendOptions,
+) -> Result<MiabResponse, MiabError> {
     let mut file = tokio::fs::File::open(local_file).await?;
     let file_size = file.metadata().await?.len();
 
     let addr = normalize_server_addr(server);
     let mut socket = TcpStream::connect(&addr).await?;
 
-    // 1. Send 64-byte initial header with known expected size
+    // 1. Send 64-byte initial header with known expected size and flags
     let mut header = MiabHeader::new(remote_path);
     header.expected_size = file_size;
+    if let Some(tok) = options.auth_token {
+        header.auth_token = tok;
+    }
+    if options.no_overwrite {
+        header.flags |= HeaderFlags::NO_OVERWRITE;
+    }
+    if options.set_executable {
+        header.flags |= HeaderFlags::SET_EXECUTABLE;
+    }
     header.write_to(&mut socket).await?;
 
     // 2. Setup progress bar if requested
-    let pb = if show_progress {
+    let pb = if options.show_progress {
         let bar = ProgressBar::new(file_size);
         if let Ok(style) = ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -65,7 +140,7 @@ pub async fn send_file_with_chunk_size(
         None
     };
 
-    let mut buf = vec![0u8; chunk_size];
+    let mut buf = vec![0u8; options.chunk_size];
     let (mut socket_rx, mut socket_tx) = socket.into_split();
     let mut hasher = crc32fast::Hasher::new();
 
@@ -98,7 +173,6 @@ pub async fn send_file_with_chunk_size(
         }
         send_res = send_future => {
             if let Err(e) = send_res {
-                // If writing errored, attempt to read server error response
                 if let Ok(resp) = MiabResponse::read_from(&mut socket_rx).await {
                     if let Some(p) = pb {
                         p.finish_and_clear();
@@ -119,22 +193,50 @@ pub async fn send_file_with_chunk_size(
     }
 }
 
-/// Stream an arbitrary async reader (such as stdin) to the remote MIAB server.
+/// Stream an arbitrary async reader (such as stdin) to the remote MIAB server with default options.
 pub async fn send_stream<R: AsyncRead + Unpin>(
     server: &str,
     remote_path: &str,
-    mut reader: R,
+    reader: R,
     show_progress: bool,
+) -> Result<MiabResponse, MiabError> {
+    send_stream_with_options(
+        server,
+        remote_path,
+        reader,
+        SendOptions {
+            show_progress,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Stream an arbitrary async reader to the remote MIAB server with SendOptions.
+pub async fn send_stream_with_options<R: AsyncRead + Unpin>(
+    server: &str,
+    remote_path: &str,
+    mut reader: R,
+    options: SendOptions,
 ) -> Result<MiabResponse, MiabError> {
     let addr = normalize_server_addr(server);
     let mut socket = TcpStream::connect(&addr).await?;
 
     // 1. Send initial header
-    let header = MiabHeader::new(remote_path);
+    let mut header = MiabHeader::new(remote_path);
+    if let Some(tok) = options.auth_token {
+        header.auth_token = tok;
+    }
+    if options.no_overwrite {
+        header.flags |= HeaderFlags::NO_OVERWRITE;
+    }
+    if options.set_executable {
+        header.flags |= HeaderFlags::SET_EXECUTABLE;
+    }
     header.write_to(&mut socket).await?;
 
     // 2. Setup progress bar if requested
-    let pb = if show_progress {
+    let pb = if options.show_progress {
         let bar = ProgressBar::new_spinner();
         if let Ok(style) = ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {bytes} sent ({bytes_per_sec})")

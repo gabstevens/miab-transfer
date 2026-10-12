@@ -8,3 +8,6 @@ BIND_ADDR="0.0.0.0:6422"
 
 # Storage root directory (default: /var/lib/miab)
 STORAGE_ROOT="/var/lib/miab"
+
+# Extra arguments (e.g., --auth-token <16-byte-hex-or-ascii>)
+EXTRA_ARGS=""

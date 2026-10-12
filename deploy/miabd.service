@@ -8,9 +8,10 @@ Wants=network-online.target
 Type=simple
 Environment="BIND_ADDR=0.0.0.0:6422"
 Environment="STORAGE_ROOT=/var/lib/miab"
+Environment="EXTRA_ARGS="
 EnvironmentFile=-/etc/default/miabd
 
-ExecStart=/usr/local/bin/miabd -b ${BIND_ADDR} -s ${STORAGE_ROOT}
+ExecStart=/usr/local/bin/miabd -b ${BIND_ADDR} -s ${STORAGE_ROOT} ${EXTRA_ARGS}
 Restart=always
 RestartSec=5s
 

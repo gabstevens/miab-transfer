@@ -1,9 +1,14 @@
 use clap::{Parser, Subcommand};
-use miab::client::{send_file, send_stream};
+use miab::client::{
+    parse_token_str, send_file_with_options, send_stream_with_options, SendOptions,
+};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "miab", about = "Message In A Bottle Client CLI")]
+#[command(
+    name = "miab",
+    about = "Message In A Bottle Client CLI (MIAB v1 / RFC-001)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -19,6 +24,15 @@ enum Commands {
         remote_path: String,
         /// Local file to upload
         local_file: PathBuf,
+        /// Optional 16-byte hex authentication token
+        #[arg(short = 't', long = "token")]
+        token: Option<String>,
+        /// Do not overwrite remote file if it already exists
+        #[arg(long = "no-overwrite", default_value_t = false)]
+        no_overwrite: bool,
+        /// Mark remote file as executable (chmod +x)
+        #[arg(short = 'x', long = "executable", default_value_t = false)]
+        executable: bool,
     },
     /// Stream stdin pipe to the remote MIAB server
     Stream {
@@ -26,6 +40,15 @@ enum Commands {
         server: String,
         /// Remote destination relative path
         remote_path: String,
+        /// Optional 16-byte hex authentication token
+        #[arg(short = 't', long = "token")]
+        token: Option<String>,
+        /// Do not overwrite remote file if it already exists
+        #[arg(long = "no-overwrite", default_value_t = false)]
+        no_overwrite: bool,
+        /// Mark remote file as executable (chmod +x)
+        #[arg(short = 'x', long = "executable", default_value_t = false)]
+        executable: bool,
     },
 }
 
@@ -38,11 +61,47 @@ async fn main() {
             server,
             remote_path,
             local_file,
-        } => send_file(&server, &remote_path, &local_file, true).await,
+            token,
+            no_overwrite,
+            executable,
+        } => {
+            let auth_token = token.as_deref().and_then(parse_token_str);
+            send_file_with_options(
+                &server,
+                &remote_path,
+                &local_file,
+                SendOptions {
+                    show_progress: true,
+                    auth_token,
+                    no_overwrite,
+                    set_executable: executable,
+                    ..Default::default()
+                },
+            )
+            .await
+        }
         Commands::Stream {
             server,
             remote_path,
-        } => send_stream(&server, &remote_path, tokio::io::stdin(), true).await,
+            token,
+            no_overwrite,
+            executable,
+        } => {
+            let auth_token = token.as_deref().and_then(parse_token_str);
+            send_stream_with_options(
+                &server,
+                &remote_path,
+                tokio::io::stdin(),
+                SendOptions {
+                    show_progress: true,
+                    auth_token,
+                    no_overwrite,
+                    set_executable: executable,
+                    ..Default::default()
+                },
+            )
+            .await
+        }
     };
 
     match result {
