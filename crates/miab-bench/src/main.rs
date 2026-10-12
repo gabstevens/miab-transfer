@@ -1,4 +1,5 @@
 mod http_server;
+mod metrics;
 mod proxy;
 mod scenarios;
 
@@ -6,19 +7,21 @@ use clap::Parser;
 use http_server::HttpServer;
 use proxy::UserspaceVpnProxy;
 use scenarios::{
-    format_bytes, print_results_table, run_http_iteration, run_miab_iteration, BenchRecord,
+    format_bytes, print_comprehensive_table, print_concurrency_table, run_concurrency_test,
+    run_http_suite, run_miab_suite, BenchRecord, ConcurrencyRecord,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "miab-bench",
-    about = "Benchmark harness for MIAB v1 vs HTTP with optional Userspace VPN simulation"
+    about = "Benchmark harness for MIAB v1 vs HTTP: Throughput, Latency Percentiles, CPU Efficiency, Wire Tax, and Concurrency"
 )]
 struct Args {
-    /// Payload sizes to benchmark, comma-separated (e.g. 1M,10M,50M)
-    #[arg(short = 's', long = "sizes", default_value = "1M,10M,50M")]
+    /// Payload sizes to benchmark, comma-separated (e.g. 10K,100K,1M,10M)
+    #[arg(short = 's', long = "sizes", default_value = "10K,100K,1M,10M")]
     sizes: String,
 
     /// MIAB chunk bottle sizes to sweep, comma-separated (e.g. 16K,64K,256K)
@@ -26,8 +29,16 @@ struct Args {
     chunks: String,
 
     /// Number of measurement iterations per scenario
-    #[arg(short = 'i', long = "iterations", default_value_t = 3)]
+    #[arg(short = 'i', long = "iterations", default_value_t = 5)]
     iterations: usize,
+
+    /// Concurrency levels to stress test (comma-separated, e.g. 10,25,50. Set to 0 to skip)
+    #[arg(long = "concurrency", default_value = "10,25")]
+    concurrency: String,
+
+    /// Payload size for the concurrency stress test
+    #[arg(long = "concurrency-payload", default_value = "1M")]
+    concurrency_payload: String,
 
     /// Protocols to benchmark: 'all', 'miab', or 'http'
     #[arg(short = 'p', long = "protocols", default_value = "all")]
@@ -42,7 +53,7 @@ struct Args {
     simulate_vpn: bool,
 
     /// Simulated one-way network latency in milliseconds
-    #[arg(long = "latency-ms", default_value_t = 20)]
+    #[arg(long = "latency-ms", default_value_t = 10)]
     latency_ms: u64,
 
     /// Simulated MTU packet slicing size in bytes (Tailscale default: 1280)
@@ -57,7 +68,7 @@ struct Args {
     #[arg(long = "http-server")]
     http_server: Option<String>,
 
-    /// Output results as a Markdown table
+    /// Output results as Markdown tables
     #[arg(long = "markdown", default_value_t = false)]
     markdown: bool,
 }
@@ -87,14 +98,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let payload_sizes: Vec<usize> = args
         .sizes
         .split(',')
+        .filter(|s| !s.trim().is_empty())
         .map(|s| parse_size(s).expect("invalid payload size"))
         .collect();
 
     let chunk_sizes: Vec<usize> = args
         .chunks
         .split(',')
+        .filter(|s| !s.trim().is_empty())
         .map(|s| parse_size(s).expect("invalid chunk size"))
         .collect();
+
+    let concurrency_levels: Vec<usize> = args
+        .concurrency
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+        .filter(|&c| c > 0)
+        .collect();
+
+    let conc_payload_size = parse_size(&args.concurrency_payload).unwrap_or(1024 * 1024);
 
     let discard_mode = args.sink.to_lowercase() == "discard";
     let test_miab = args.protocols == "all" || args.protocols == "miab";
@@ -103,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!(
         "\n=================================================================================="
     );
-    println!(" MIAB-TRANSFER BENCHMARK SUITE");
+    println!(" MIAB-TRANSFER MULTI-DIMENSIONAL BENCHMARK SUITE");
     println!("==================================================================================");
     println!(
         " Storage Sink    : {}",
@@ -130,6 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .collect::<Vec<_>>()
         );
     }
+    if !concurrency_levels.is_empty() {
+        println!(
+            " Concurrency Test: {:?} concurrent streams (Payload: {})",
+            concurrency_levels,
+            format_bytes(conc_payload_size)
+        );
+    }
 
     if args.simulate_vpn {
         println!(" Network Mode    : SIMULATED VPN (Userspace Proxy)");
@@ -154,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let temp_dir = tempfile::tempdir()?;
     let storage_root = temp_dir.path().to_path_buf();
 
-    // Setup MIAB Server endpoint
+    // 1. Setup MIAB Server endpoint
     let (miab_target_addr, _miab_shutdown) = if let Some(ref remote) = args.miab_server {
         println!("==> Using remote MIAB server: {}", remote);
         (remote.clone(), None)
@@ -190,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (miab_target_addr, None)
     };
 
-    // Setup HTTP Server endpoint if HTTP testing is enabled
+    // 2. Setup HTTP Server endpoint if HTTP testing is enabled
     let (_http_server, active_http_url, _http_proxy_shutdown) = if test_http {
         if let Some(ref remote_url) = args.http_server {
             println!("==> Using remote HTTP server: {}", remote_url);
@@ -224,17 +254,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     println!("\nBeginning benchmark execution...\n");
-    let mut records = Vec::new();
+    let mut records: Vec<BenchRecord> = Vec::new();
 
+    // SECTION A: Throughput, Latency Percentiles, CPU Efficiency, and Wire Tax
     for &payload_size in &payload_sizes {
         println!(
             "--> Benchmarking payload size: {}",
             format_bytes(payload_size)
         );
-        // Deterministic patterned buffer
         let payload = vec![0xABu8; payload_size];
 
-        // 1. Run MIAB scenarios across chunk sizes
+        // 1. MIAB runs across chunk sizes
         if test_miab {
             for &chunk_size in &chunk_sizes {
                 print!(
@@ -242,52 +272,99 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     format_bytes(chunk_size),
                     args.iterations
                 );
-                let mut durations = Vec::with_capacity(args.iterations);
-
-                for _ in 0..args.iterations {
-                    let d = run_miab_iteration(&active_miab_addr, &payload, chunk_size).await?;
-                    durations.push(d);
-                }
-
-                let record = BenchRecord {
-                    protocol: "MIAB v1".to_string(),
-                    payload_bytes: payload_size,
-                    chunk_bytes: chunk_size,
-                    durations,
-                };
-                println!("done ({:.2} MB/s)", record.throughput_mb_s());
+                let record =
+                    run_miab_suite(&active_miab_addr, &payload, chunk_size, args.iterations)
+                        .await?;
+                println!(
+                    "done ({:.2} MB/s, p50: {:?}, CPU: {:.1} ms/GB)",
+                    record.throughput_mb_s(),
+                    record.p50_duration(),
+                    record.cpu_ms_per_gb()
+                );
                 records.push(record);
             }
         }
 
-        // 2. Run HTTP scenario
+        // 2. HTTP run
         if test_http {
-            let default_http_chunk = 64 * 1024; // 64 KB standard HTTP chunk
+            let default_http_chunk = 64 * 1024;
             print!(
                 "    [HTTP] chunk: {:<8} ({} iterations)... ",
                 format_bytes(default_http_chunk),
                 args.iterations
             );
-            let mut durations = Vec::with_capacity(args.iterations);
-
-            for _ in 0..args.iterations {
-                let d = run_http_iteration(&active_http_url, &payload, default_http_chunk).await?;
-                durations.push(d);
-            }
-
-            let record = BenchRecord {
-                protocol: "HTTP/1.1 (Chunked)".to_string(),
-                payload_bytes: payload_size,
-                chunk_bytes: default_http_chunk,
-                durations,
-            };
-            println!("done ({:.2} MB/s)", record.throughput_mb_s());
+            let record = run_http_suite(
+                &active_http_url,
+                &payload,
+                default_http_chunk,
+                args.iterations,
+            )
+            .await?;
+            println!(
+                "done ({:.2} MB/s, p50: {:?}, CPU: {:.1} ms/GB)",
+                record.throughput_mb_s(),
+                record.p50_duration(),
+                record.cpu_ms_per_gb()
+            );
             records.push(record);
         }
     }
 
     println!("\n");
-    print_results_table(&records, args.markdown);
+    print_comprehensive_table(&records, args.markdown);
 
+    // SECTION B: Concurrency and Memory Footprint Stress Test
+    if !concurrency_levels.is_empty() {
+        println!(
+            "\n--> Running Concurrency & Memory Stress Test (Payload: {})...",
+            format_bytes(conc_payload_size)
+        );
+        let conc_payload = Arc::new(vec![0xCDu8; conc_payload_size]);
+        let mut conc_records: Vec<ConcurrencyRecord> = Vec::new();
+
+        for &c in &concurrency_levels {
+            if test_miab {
+                print!("    [MIAB] {} parallel connections... ", c);
+                let rec = run_concurrency_test(
+                    true,
+                    &active_miab_addr,
+                    conc_payload.clone(),
+                    64 * 1024,
+                    c,
+                )
+                .await;
+                println!(
+                    "done ({:.2} MB/s aggregate, peak RSS: {}, errors: {})",
+                    rec.aggregate_mb_s,
+                    format_bytes(rec.peak_rss_bytes as usize),
+                    rec.errors
+                );
+                conc_records.push(rec);
+            }
+
+            if test_http {
+                print!("    [HTTP] {} parallel connections... ", c);
+                let rec = run_concurrency_test(
+                    false,
+                    &active_http_url,
+                    conc_payload.clone(),
+                    64 * 1024,
+                    c,
+                )
+                .await;
+                println!(
+                    "done ({:.2} MB/s aggregate, peak RSS: {}, errors: {})",
+                    rec.aggregate_mb_s,
+                    format_bytes(rec.peak_rss_bytes as usize),
+                    rec.errors
+                );
+                conc_records.push(rec);
+            }
+        }
+
+        print_concurrency_table(&conc_records, args.markdown);
+    }
+
+    println!();
     Ok(())
 }

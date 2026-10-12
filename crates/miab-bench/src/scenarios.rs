@@ -1,3 +1,8 @@
+use crate::metrics::{
+    cpu_ms_per_gb, current_rss_bytes, http_wire_overhead, miab_wire_overhead, ProcessMetrics,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -6,6 +11,8 @@ pub struct BenchRecord {
     pub payload_bytes: usize,
     pub chunk_bytes: usize,
     pub durations: Vec<Duration>,
+    pub cpu_duration: Duration,
+    pub wire_overhead_bytes: usize,
 }
 
 impl BenchRecord {
@@ -17,6 +24,41 @@ impl BenchRecord {
         total / self.durations.len() as u32
     }
 
+    pub fn sorted_durations(&self) -> Vec<Duration> {
+        let mut d = self.durations.clone();
+        d.sort();
+        d
+    }
+
+    pub fn p50_duration(&self) -> Duration {
+        let sorted = self.sorted_durations();
+        if sorted.is_empty() {
+            return Duration::ZERO;
+        }
+        let idx = (sorted.len() as f64 * 0.50).floor() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    #[allow(dead_code)]
+    pub fn p95_duration(&self) -> Duration {
+        let sorted = self.sorted_durations();
+        if sorted.is_empty() {
+            return Duration::ZERO;
+        }
+        let idx = (sorted.len() as f64 * 0.95).floor() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    pub fn p99_duration(&self) -> Duration {
+        let sorted = self.sorted_durations();
+        if sorted.is_empty() {
+            return Duration::ZERO;
+        }
+        let idx = (sorted.len() as f64 * 0.99).floor() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    #[allow(dead_code)]
     pub fn min_duration(&self) -> Duration {
         self.durations
             .iter()
@@ -25,6 +67,7 @@ impl BenchRecord {
             .unwrap_or(Duration::ZERO)
     }
 
+    #[allow(dead_code)]
     pub fn max_duration(&self) -> Duration {
         self.durations
             .iter()
@@ -41,6 +84,7 @@ impl BenchRecord {
         (self.payload_bytes as f64 / (1024.0 * 1024.0)) / secs
     }
 
+    #[allow(dead_code)]
     pub fn throughput_mbps(&self) -> f64 {
         let secs = self.mean_duration().as_secs_f64();
         if secs <= 0.0 {
@@ -48,6 +92,32 @@ impl BenchRecord {
         }
         (self.payload_bytes as f64 * 8.0 / 1_000_000.0) / secs
     }
+
+    pub fn cpu_ms_per_gb(&self) -> f64 {
+        let total_transferred = self.payload_bytes * self.durations.len();
+        cpu_ms_per_gb(self.cpu_duration, total_transferred)
+    }
+
+    pub fn wire_tax_pct(&self) -> f64 {
+        if self.payload_bytes == 0 {
+            return 0.0;
+        }
+        (self.wire_overhead_bytes as f64 / self.payload_bytes as f64) * 100.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConcurrencyRecord {
+    pub protocol: String,
+    pub concurrency: usize,
+    pub payload_bytes: usize,
+    pub wall_duration: Duration,
+    pub aggregate_mb_s: f64,
+    #[allow(dead_code)]
+    pub start_rss_bytes: u64,
+    pub peak_rss_bytes: u64,
+    pub rss_delta_bytes: i64,
+    pub errors: usize,
 }
 
 /// Execute a single MIAB benchmark iteration.
@@ -95,7 +165,154 @@ pub async fn run_http_iteration(
     Ok(start.elapsed())
 }
 
-/// Format bytes into a human-readable string (e.g. 1.00 MB, 64 KB).
+/// Measure a batch of MIAB iterations while profiling CPU and memory usage.
+pub async fn run_miab_suite(
+    server_addr: &str,
+    payload: &[u8],
+    chunk_size: usize,
+    iterations: usize,
+) -> Result<BenchRecord, Box<dyn std::error::Error + Send + Sync>> {
+    let m_start = ProcessMetrics::snapshot();
+    let mut durations = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let d = run_miab_iteration(server_addr, payload, chunk_size).await?;
+        durations.push(d);
+    }
+
+    let m_end = ProcessMetrics::snapshot();
+    let cpu_duration = m_end.cpu_delta(&m_start);
+    let wire_overhead_bytes = miab_wire_overhead(payload.len(), chunk_size);
+
+    Ok(BenchRecord {
+        protocol: "MIAB v1".to_string(),
+        payload_bytes: payload.len(),
+        chunk_bytes: chunk_size,
+        durations,
+        cpu_duration,
+        wire_overhead_bytes,
+    })
+}
+
+/// Measure a batch of HTTP iterations while profiling CPU and memory usage.
+pub async fn run_http_suite(
+    http_url: &str,
+    payload: &[u8],
+    chunk_size: usize,
+    iterations: usize,
+) -> Result<BenchRecord, Box<dyn std::error::Error + Send + Sync>> {
+    let m_start = ProcessMetrics::snapshot();
+    let mut durations = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let d = run_http_iteration(http_url, payload, chunk_size).await?;
+        durations.push(d);
+    }
+
+    let m_end = ProcessMetrics::snapshot();
+    let cpu_duration = m_end.cpu_delta(&m_start);
+    let wire_overhead_bytes = http_wire_overhead(payload.len(), chunk_size);
+
+    Ok(BenchRecord {
+        protocol: "HTTP/1.1 (Chunked)".to_string(),
+        payload_bytes: payload.len(),
+        chunk_bytes: chunk_size,
+        durations,
+        cpu_duration,
+        wire_overhead_bytes,
+    })
+}
+
+/// Run concurrent parallel streams stress test measuring aggregate throughput and peak RSS.
+pub async fn run_concurrency_test(
+    is_miab: bool,
+    target: &str,
+    payload: Arc<Vec<u8>>,
+    chunk_size: usize,
+    concurrency: usize,
+) -> ConcurrencyRecord {
+    let start_rss = current_rss_bytes().unwrap_or(0);
+    let peak_rss = Arc::new(AtomicUsize::new(start_rss as usize));
+
+    // Background sampler task to monitor peak memory during parallel flood
+    let peak_rss_clone = peak_rss.clone();
+    let (sampler_stop_tx, mut sampler_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut sampler_stop_rx => break,
+                _ = tokio::time::sleep(Duration::from_millis(2)) => {
+                    if let Some(rss) = current_rss_bytes() {
+                        peak_rss_clone.fetch_max(rss as usize, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    });
+
+    let errors = Arc::new(AtomicUsize::new(0));
+    let start_wall = Instant::now();
+
+    let mut handles = Vec::with_capacity(concurrency);
+    for i in 0..concurrency {
+        let target = target.to_string();
+        let payload = payload.clone();
+        let errors = errors.clone();
+
+        handles.push(tokio::spawn(async move {
+            if is_miab {
+                let path = format!("bench/concurrent_{}.bin", i);
+                if miab::client::send_bytes_with_chunk_size(&target, &path, &payload, chunk_size)
+                    .await
+                    .is_err()
+                {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                }
+            } else if run_http_iteration(&target, &payload, chunk_size)
+                .await
+                .is_err()
+            {
+                errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let wall_duration = start_wall.elapsed();
+    let _ = sampler_stop_tx.send(());
+
+    let final_peak = peak_rss.load(Ordering::Relaxed) as u64;
+    let rss_delta = (final_peak as i64) - (start_rss as i64);
+    let total_bytes = payload.len() * concurrency;
+    let secs = wall_duration.as_secs_f64();
+    let aggregate_mb_s = if secs > 0.0 {
+        (total_bytes as f64 / (1024.0 * 1024.0)) / secs
+    } else {
+        0.0
+    };
+
+    ConcurrencyRecord {
+        protocol: if is_miab {
+            "MIAB v1"
+        } else {
+            "HTTP/1.1 (Chunked)"
+        }
+        .to_string(),
+        concurrency,
+        payload_bytes: payload.len(),
+        wall_duration,
+        aggregate_mb_s,
+        start_rss_bytes: start_rss,
+        peak_rss_bytes: final_peak,
+        rss_delta_bytes: rss_delta,
+        errors: errors.load(Ordering::Relaxed),
+    }
+}
+
+/// Format bytes into a human-readable string (e.g. 1.0 MB, 64 KB).
 pub fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -108,43 +325,127 @@ pub fn format_bytes(bytes: usize) -> String {
     }
 }
 
-/// Print formatted comparison results table to terminal.
-pub fn print_results_table(records: &[BenchRecord], is_markdown: bool) {
+/// Format duration compactly (e.g. 842.1µs, 12.34ms, 1.25s).
+pub fn format_duration(d: Duration) -> String {
+    let micros = d.as_micros();
+    if micros < 1000 {
+        format!("{}µs", micros)
+    } else if micros < 1_000_000 {
+        format!("{:.2}ms", d.as_secs_f64() * 1000.0)
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
+/// Print comprehensive comparison results table to terminal.
+pub fn print_comprehensive_table(records: &[BenchRecord], is_markdown: bool) {
     if is_markdown {
-        println!("| Payload | Protocol | Chunk Size | Mean Time | Min / Max | Throughput (MB/s) | Bandwidth (Mbps) |");
-        println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
+        println!("| Payload | Protocol | Chunk | Median (p50) | p99 Latency | Throughput (MB/s) | CPU Time (ms/GB) | Wire Tax |");
+        println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
         for r in records {
             println!(
-                "| {} | {} | {} | {:.2?} | {:.2?} / {:.2?} | {:.2} MB/s | {:.2} Mbps |",
+                "| {} | {} | {} | {} | {} | {:.2} MB/s | {:.2} ms/GB | {:.3}% |",
                 format_bytes(r.payload_bytes),
                 r.protocol,
                 format_bytes(r.chunk_bytes),
-                r.mean_duration(),
-                r.min_duration(),
-                r.max_duration(),
+                format_duration(r.p50_duration()),
+                format_duration(r.p99_duration()),
                 r.throughput_mb_s(),
-                r.throughput_mbps()
+                r.cpu_ms_per_gb(),
+                r.wire_tax_pct(),
             );
         }
     } else {
-        println!("{:=<105}", "");
+        println!("{:=<115}", "");
         println!(
-            "{:<10} | {:<18} | {:<10} | {:<12} | {:<15} | {:<16} | {:<14}",
-            "Payload", "Protocol", "Chunk", "Mean Time", "Min / Max", "Throughput", "Bandwidth"
+            "{:<9} | {:<18} | {:<8} | {:<12} | {:<12} | {:>14} | {:>15} | {:>9}",
+            "Payload",
+            "Protocol",
+            "Chunk",
+            "Median(p50)",
+            "p99 Latency",
+            "Throughput",
+            "CPU Time / GB",
+            "Wire Tax"
         );
-        println!("{:-<105}", "");
+        println!("{:-<115}", "");
         for r in records {
             println!(
-                "{:<10} | {:<18} | {:<10} | {:<12.2?} | {:<15} | {:>10.2} MB/s | {:>9.2} Mbps",
+                "{:<9} | {:<18} | {:<8} | {:<12} | {:<12} | {:>11.2} MB/s | {:>10.2} ms/GB | {:>8.3}%",
                 format_bytes(r.payload_bytes),
                 r.protocol,
                 format_bytes(r.chunk_bytes),
-                r.mean_duration(),
-                format!("{:.2?} / {:.2?}", r.min_duration(), r.max_duration()),
+                format_duration(r.p50_duration()),
+                format_duration(r.p99_duration()),
                 r.throughput_mb_s(),
-                r.throughput_mbps()
+                r.cpu_ms_per_gb(),
+                r.wire_tax_pct(),
             );
         }
-        println!("{:=<105}", "");
+        println!("{:=<115}", "");
+    }
+}
+
+/// Print concurrency stress test results table.
+pub fn print_concurrency_table(records: &[ConcurrencyRecord], is_markdown: bool) {
+    if is_markdown {
+        println!("\n### Concurrency & Memory Stress Test");
+        println!("| Protocol | Concurrency | Total Transferred | Wall Time | Aggregate (MB/s) | Peak RSS | Memory Delta | Errors |");
+        println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
+        for r in records {
+            let total_bytes = r.payload_bytes * r.concurrency;
+            let delta_str = if r.rss_delta_bytes >= 0 {
+                format!("+{}", format_bytes(r.rss_delta_bytes as usize))
+            } else {
+                format!("-{}", format_bytes((-r.rss_delta_bytes) as usize))
+            };
+            println!(
+                "| {} | {} streams | {} | {} | {:.2} MB/s | {} | {} | {} |",
+                r.protocol,
+                r.concurrency,
+                format_bytes(total_bytes),
+                format_duration(r.wall_duration),
+                r.aggregate_mb_s,
+                format_bytes(r.peak_rss_bytes as usize),
+                delta_str,
+                r.errors
+            );
+        }
+    } else {
+        println!("\n{:=<115}", "");
+        println!(" CONCURRENCY & MEMORY STRESS RESULTS");
+        println!("{:=<115}", "");
+        println!(
+            "{:<18} | {:<11} | {:<14} | {:<10} | {:>15} | {:>10} | {:>12} | {:>6}",
+            "Protocol",
+            "Concurrency",
+            "Total Data",
+            "Wall Time",
+            "Aggregate MB/s",
+            "Peak RSS",
+            "Mem Delta",
+            "Errors"
+        );
+        println!("{:-<115}", "");
+        for r in records {
+            let total_bytes = r.payload_bytes * r.concurrency;
+            let delta_str = if r.rss_delta_bytes >= 0 {
+                format!("+{}", format_bytes(r.rss_delta_bytes as usize))
+            } else {
+                format!("-{}", format_bytes((-r.rss_delta_bytes) as usize))
+            };
+            println!(
+                "{:<18} | {:>2} streams  | {:<14} | {:<10} | {:>12.2} MB/s | {:>10} | {:>12} | {:>6}",
+                r.protocol,
+                r.concurrency,
+                format_bytes(total_bytes),
+                format_duration(r.wall_duration),
+                r.aggregate_mb_s,
+                format_bytes(r.peak_rss_bytes as usize),
+                delta_str,
+                r.errors
+            );
+        }
+        println!("{:=<115}", "");
     }
 }
