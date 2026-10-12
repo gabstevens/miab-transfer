@@ -231,7 +231,7 @@ cargo run --release -p miab-bench -- \
 
 ---
 
-### Sample Results
+### Sample Results (RFC-001 with CRC-32 Validation)
 
 #### A. Single Stream Performance & Efficiency
 
@@ -239,14 +239,14 @@ cargo run --release -p miab-bench -- \
 ===================================================================================================================
 Payload   | Protocol           | Chunk    | Median(p50)  | p99 Latency  |     Throughput |   CPU Time / GB |  Wire Tax
 -------------------------------------------------------------------------------------------------------------------
-10 KB     | MIAB v1            | 64 KB    | 302µs        | 441µs        |       27.91 MB/s |   45,109 ms/GB  |    0.527%
-10 KB     | HTTP/1.1 (Chunked) | 64 KB    | 375µs        | 419µs        |       28.17 MB/s |   52,156 ms/GB  |    2.959%
-100 KB    | MIAB v1            | 64 KB    | 352µs        | 381µs        |      272.32 MB/s |    4,924 ms/GB  |    0.057%
-100 KB    | HTTP/1.1 (Chunked) | 64 KB    | 352µs        | 500µs        |      256.29 MB/s |    6,184 ms/GB  |    0.304%
-1.0 MB    | MIAB v1            | 64 KB    | 867µs        | 915µs        |    1,146.04 MB/s |    1,389 ms/GB  |    0.011%
-1.0 MB    | HTTP/1.1 (Chunked) | 64 KB    | 1.17ms       | 1.44ms       |      855.15 MB/s |    2,088 ms/GB  |    0.040%
-10.0 MB   | MIAB v1            | 64 KB    | 5.10ms       | 5.96ms       |    1,928.90 MB/s |      939 ms/GB  |    0.007%
-10.0 MB   | HTTP/1.1 (Chunked) | 64 KB    | 3.66ms       | 3.91ms       |    2,715.81 MB/s |    1,084 ms/GB  |    0.015%
+10 KB     | MIAB v1            | 64 KB    | 285µs        | 341µs        |       33.15 MB/s |   40,978 ms/GB  |    1.162%
+10 KB     | HTTP/1.1 (Chunked) | 64 KB    | 297µs        | 335µs        |       34.33 MB/s |   48,737 ms/GB  |    2.959%
+100 KB    | MIAB v1            | 64 KB    | 287µs        | 402µs        |      315.50 MB/s |    4,265 ms/GB  |    0.120%
+100 KB    | HTTP/1.1 (Chunked) | 64 KB    | 299µs        | 421µs        |      296.54 MB/s |    5,521 ms/GB  |    0.304%
+1.0 MB    | MIAB v1            | 64 KB    | 747µs        | 936µs        |    1,271.83 MB/s |    1,259 ms/GB  |    0.017%
+1.0 MB    | HTTP/1.1 (Chunked) | 64 KB    | 887µs        | 1.01ms       |    1,151.57 MB/s |    1,629 ms/GB  |    0.040%
+10.0 MB   | MIAB v1            | 64 KB    | 5.65ms       | 6.07ms       |    1,752.31 MB/s |    1,013 ms/GB  |    0.007%
+10.0 MB   | HTTP/1.1 (Chunked) | 64 KB    | 3.50ms       | 3.98ms       |    2,803.16 MB/s |    1,287 ms/GB  |    0.015%
 ===================================================================================================================
 ```
 
@@ -256,18 +256,19 @@ Payload   | Protocol           | Chunk    | Median(p50)  | p99 Latency  |     Th
 ===================================================================================================================
 Protocol           | Concurrency | Total Data     | Wall Time  |  Aggregate MB/s |   Peak RSS |    Mem Delta | Errors
 -------------------------------------------------------------------------------------------------------------------
-MIAB v1            | 10 streams  | 10.0 MB        | 3.55ms     |    2,819.17 MB/s |    17.5 MB |       +92 KB |      0
-HTTP/1.1 (Chunked) | 10 streams  | 10.0 MB        | 4.72ms     |    2,117.55 MB/s |    24.2 MB |      +6.6 MB |      0
-MIAB v1            | 25 streams  | 25.0 MB        | 4.60ms     |    5,434.30 MB/s |    26.2 MB |        +4 KB |      0
-HTTP/1.1 (Chunked) | 25 streams  | 25.0 MB        | 8.98ms     |    2,784.14 MB/s |    41.9 MB |     +15.7 MB |      0
+MIAB v1            | 10 streams  | 10.0 MB        | 2.41ms     |    4,150.92 MB/s |     8.7 MB |         +0 B |      0
+HTTP/1.1 (Chunked) | 10 streams  | 10.0 MB        | 4.82ms     |    2,075.28 MB/s |    17.1 MB |      +8.2 MB |      0
+MIAB v1            | 25 streams  | 25.0 MB        | 5.25ms     |    4,765.77 MB/s |    18.6 MB |        +4 KB |      0
+HTTP/1.1 (Chunked) | 25 streams  | 25.0 MB        | 10.11ms    |    2,472.32 MB/s |    35.5 MB |     +16.8 MB |      0
 ===================================================================================================================
 ```
 
 > **Takeaways**:
-> 1. **Zero Memory Inflation**: At 25 concurrent uploads, MIAB memory remains strictly bounded (+4 KB delta), while HTTP memory balloons by +15.7 MB.
-> 2. **2x Aggregate Throughput Under Concurrency**: MIAB reaches **5,434 MB/s** aggregate vs HTTP's **2,784 MB/s**, finishing the parallel flood in half the wall time (4.6ms vs 8.9ms).
-> 3. **50% Less CPU Burn**: MIAB consumes ~1,389 ms of CPU time per GB on 1MB payloads vs HTTP's 2,088 ms/GB.
-> 4. **5x Lower Wire Tax**: For small 10 KB drops, HTTP imposes a ~3% wire tax in headers vs MIAB's 0.5%.
+> 1. **Zero Memory Inflation**: At 25 concurrent uploads, MIAB memory remains strictly bounded (+4 KB delta), while HTTP memory balloons by +16.8 MB.
+> 2. **2x Aggregate Throughput Under Concurrency**: MIAB reaches **4,765 MB/s** aggregate vs HTTP's **2,472 MB/s**, finishing the parallel flood in half the wall time (5.2ms vs 10.1ms).
+> 3. **30% Less CPU Burn**: MIAB consumes ~1,259 ms of CPU time per GB on 1MB payloads vs HTTP's 1,629 ms/GB, even while calculating end-to-end CRC-32 on every byte.
+> 4. **Nearly 3x Lower Wire Tax**: For small 10 KB drops, HTTP imposes a ~3% wire tax in headers vs MIAB's 1.16%.
+
 
 ---
 
